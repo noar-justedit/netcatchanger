@@ -1,9 +1,9 @@
 @echo off
 cd /d "%~dp0\.."
-title Build NetCatChanger 2.0.1
+title Build NetCatChanger 2.0.2
 echo.
 echo ==========================================
-echo    NetCatChanger 2.0.1 - Build EXE
+echo    NetCatChanger 2.0.2 - Build EXE
 echo ==========================================
 echo.
 
@@ -32,7 +32,10 @@ echo [3/3] Compiling...
 set ICON_OPT=
 if exist assets\app_icon.ico set ICON_OPT=--icon=assets\app_icon.ico
 
-python -m PyInstaller --onefile --windowed --name NetCatChanger --uac-admin %ICON_OPT% --add-data "src\icons.py;." src\network_switcher.py
+set VER_OPT=
+if exist src\version_info.txt set VER_OPT=--version-file=src\version_info.txt
+
+python -m PyInstaller --onefile --windowed --name NetCatChanger --uac-admin %ICON_OPT% %VER_OPT% --add-data "src\icons.py;." src\network_switcher.py
 
 if errorlevel 1 ( echo. & echo [ERROR] Build failed. & pause & exit /b 1 )
 

@@ -14,7 +14,7 @@ except ImportError:
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 GITHUB_URL  = "https://github.com/noar-justedit/netcatchanger"
 
 # ---------------------------------------------------------------------------
@@ -31,14 +31,37 @@ def run_as_admin():
 # ---------------------------------------------------------------------------
 # PowerShell -- hidden, no console flash
 # ---------------------------------------------------------------------------
+PS_ARGS = ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden"]
+
 def run_ps(cmd):
     r = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive",
-         "-WindowStyle", "Hidden", "-Command", cmd],
+        PS_ARGS + ["-Command", cmd],
         capture_output=True, text=True,
         encoding="utf-8", errors="replace",
         creationflags=CREATE_NO_WINDOW)
     return r.stdout.strip(), r.stderr.strip()
+
+def ps_quote(s):
+    """Quote a value for PowerShell. Single quotes are literal there, so the
+    only escaping needed is doubling an embedded quote."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+def run_ps_action(cmd):
+    """Run a state-changing command and decide success from the EXIT CODE.
+
+    'stderr is empty' is not a success test: PowerShell writes warnings to
+    stderr too (false failure), and several cmdlets report a failure without
+    writing anything there (false success). Wrapping the command makes any
+    terminating error come back as exit code 1.
+    """
+    wrapped = ("$ErrorActionPreference='Stop'; try { " + cmd +
+               " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; exit 0")
+    r = subprocess.run(
+        PS_ARGS + ["-Command", wrapped],
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        creationflags=CREATE_NO_WINDOW)
+    return r.returncode == 0, (r.stderr or "").strip()
 
 # ---------------------------------------------------------------------------
 # Single batched PS call -- all interface data in one shot
@@ -67,20 +90,40 @@ try {
         }
 } catch {}
 
+# netsh translates its field labels ("Radio type" -> "Type de radio",
+# "Band" -> "Bande", "Channel" -> "Canal"...), so matching on labels only ever
+# worked on an English Windows. Everything below matches on the VALUE shape
+# instead, which is identical in every locale.
 $wifiBlocks = @{}
 try {
+    $aliases = @{}
+    foreach ($p in $profiles) { $aliases[$p.InterfaceAlias] = $true }
+
     $netshOut = netsh wlan show interfaces 2>$null
     $cur = $null
     foreach ($line in $netshOut) {
-        if ($line -match '^\s+Name\s+:\s+(.+)$') {
-            $cur = $matches[1].Trim()
+        $i = "$line".IndexOf(':')
+        if ($i -lt 1) { continue }
+        $label = "$line".Substring(0, $i).Trim()
+        $value = "$line".Substring($i + 1).Trim()
+        if ($value -eq '') { continue }
+
+        # Start of an interface block: the value is one of the aliases we track.
+        if ($aliases.ContainsKey($value) -and -not $wifiBlocks.ContainsKey($value)) {
+            $cur = $value
             $wifiBlocks[$cur] = @{ Signal=-1; RadioType=''; Band=''; Channel=-1 }
+            continue
         }
-        if ($cur) {
-            if ($line -match '^\s+Signal\s+:\s+(\d+)%')       { $wifiBlocks[$cur].Signal    = [int]$matches[1] }
-            if ($line -match '^\s+Radio type\s+:\s+(.+)$')    { $wifiBlocks[$cur].RadioType = $matches[1].Trim() }
-            if ($line -match '^\s+Band\s+:\s+(.+)$')          { $wifiBlocks[$cur].Band      = $matches[1].Trim() }
-            if ($line -match '^\s+Channel\s+:\s+(\d+)')       { $wifiBlocks[$cur].Channel   = [int]$matches[1] }
+        if (-not $cur) { continue }
+
+        if ($value -match '^(\d{1,3})\s*%$')       { $wifiBlocks[$cur].Signal    = [int]$matches[1]; continue }
+        if ($value -match '802\.11')               { $wifiBlocks[$cur].RadioType = $value;           continue }
+        if ($value -match '\d+([.,]\d+)?\s*GHz')   { $wifiBlocks[$cur].Band      = $value;           continue }
+        # Channel is the only bare integer left once the rate lines are skipped
+        # (their label carries the unit: Mbps / Mbit/s / Mbits/s / MBit/s).
+        if ($label -notmatch '(?i)b(it|ps)' -and $value -match '^\d{1,3}$' -and [int]$value -le 233) {
+            if ($wifiBlocks[$cur].Channel -lt 0) { $wifiBlocks[$cur].Channel = [int]$value }
+            continue
         }
     }
 } catch {}
@@ -145,21 +188,31 @@ def get_firewall_state():
     on = sum(1 for l in lines if l.lower() == "true")
     return on, len(lines)
 
+VALID_CATEGORIES = ("Private", "Public", "DomainAuthenticated")
+
 def set_network_profile(alias, category):
-    _, err = run_ps(
-        f'Set-NetConnectionProfile -InterfaceAlias "{alias}" -NetworkCategory {category}')
-    return err == ""
+    if category not in VALID_CATEGORIES:
+        return False
+    ok, _ = run_ps_action(
+        f"Set-NetConnectionProfile -InterfaceAlias {ps_quote(alias)} "
+        f"-NetworkCategory {category}")
+    return ok
 
 def set_firewall_state(enable):
     val = "True" if enable else "False"
-    _, err = run_ps(f"Set-NetFirewallProfile -All -Enabled {val}")
-    return err == ""
+    ok, _ = run_ps_action(f"Set-NetFirewallProfile -All -Enabled {val}")
+    return ok
 
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
-def detect_iface_type(alias, media_type=""):
-    kws = ["wi-fi", "wifi", "wireless", "wlan", "802.11", "wi fi", "airport"]
+def detect_iface_type(alias, media_type="", wifi_seen=False):
+    # wifi_seen wins: if netsh reported a Wi-Fi block for this alias it IS Wi-Fi,
+    # whatever the adapter happens to be named in the user's language.
+    if wifi_seen:
+        return "wifi"
+    kws = ["wi-fi", "wifi", "wireless", "wlan", "802.11", "wi fi", "airport",
+           "sans fil", "drahtlos", "inalámbrica"]
     if any(k in alias.lower() for k in kws):
         return "wifi"
     if "802.11" in media_type.lower():
@@ -178,10 +231,15 @@ def parse_wifi_standard(radio_type):
     return radio_type.strip()
 
 def parse_wifi_band(band_str, channel):
-    b = band_str.lower()
-    if "6" in b and "ghz" in b: return "6 GHz"
-    if "5" in b and "ghz" in b: return "5 GHz"
-    if "2.4" in b:               return "2.4 GHz"
+    # A French Windows prints "2,4 GHz" - hence the comma handling.
+    b = (band_str or "").lower().replace(",", ".")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*ghz", b)
+    if m:
+        v = float(m.group(1))
+        if abs(v - 2.4) < 0.3: return "2.4 GHz"
+        if abs(v - 5.0) < 0.6: return "5 GHz"
+        if abs(v - 6.0) < 0.6: return "6 GHz"
+        return f"{m.group(1)} GHz"
     if channel > 0:
         if channel <= 14:  return "2.4 GHz"
         if channel <= 177: return "5 GHz"
@@ -212,12 +270,41 @@ def signal_color(pct):
     return PUBLIC
 
 # ---------------------------------------------------------------------------
-# Background network watcher -- polls every 3s, negligible CPU
+# Background watcher
+#
+# One long-lived PowerShell process that polls internally and prints a line
+# only when something actually changed. The previous version spawned a fresh
+# powershell.exe every 3 seconds, which costs 200-400 ms of CPU per tick and
+# keeps the disk awake for nothing. It also watches the firewall now, so a
+# change made from another tool shows up in the UI.
 # ---------------------------------------------------------------------------
+_WATCH_SCRIPT = r"""
+$last  = ''
+$first = $true
+while ($true) {
+    try {
+        $s = (Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+              Sort-Object InterfaceAlias |
+              ForEach-Object { "$($_.InterfaceAlias)=$([int]$_.NetworkCategory)" }) -join ';'
+        $f = (Get-NetFirewallProfile -All -ErrorAction SilentlyContinue |
+              ForEach-Object { "$($_.Enabled)" }) -join ','
+        $cur = "$s|$f"
+        if ($first) { $last = $cur; $first = $false }
+        elseif ($cur -ne $last) {
+            $last = $cur
+            Write-Output 'CHANGED'
+            [Console]::Out.Flush()
+        }
+    } catch {}
+    Start-Sleep -Seconds 3
+}
+"""
+
 class NetworkWatcher:
     def __init__(self, callback):
         self._cb      = callback
         self._running = False
+        self._proc    = None
 
     def start(self):
         self._running = True
@@ -225,22 +312,31 @@ class NetworkWatcher:
 
     def stop(self):
         self._running = False
+        p = self._proc
+        self._proc = None
+        if p:
+            try:    p.kill()
+            except Exception: pass
 
     def _loop(self):
-        last = None
         while self._running:
             try:
-                out, _ = run_ps(
-                    "Get-NetConnectionProfile -ErrorAction SilentlyContinue | "
-                    "Select-Object InterfaceAlias,NetworkCategory | "
-                    "ConvertTo-Json -Compress")
-                h = hash(out)
-                if last is not None and h != last:
-                    self._cb()
-                last = h
-            except:
+                self._proc = subprocess.Popen(
+                    PS_ARGS + ["-Command", _WATCH_SCRIPT],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL, text=True,
+                    encoding="utf-8", errors="replace",
+                    creationflags=CREATE_NO_WINDOW)
+                for line in self._proc.stdout:
+                    if not self._running:
+                        break
+                    if line.strip() == "CHANGED":
+                        self._cb()
+            except Exception:
                 pass
-            time.sleep(3)
+            if not self._running:
+                break
+            time.sleep(5)   # the helper died -- back off, then restart it
 
 # ---------------------------------------------------------------------------
 # Icon cache -- each key loaded once per session
@@ -541,12 +637,13 @@ class App(tk.Tk):
         v4    = p.get("IPv4Address", "N/A")
         v6    = p.get("IPv6Address", "N/A")
         media = p.get("MediaType", "")
-        itype = detect_iface_type(alias, media)
         color = info["color"]
         ikey  = info["icon_key"]
 
         signal   = int(p.get("WifiSignal", -1))
         standard = parse_wifi_standard(p.get("WifiStandard", ""))
+        itype = detect_iface_type(alias, media,
+                                  wifi_seen=(signal >= 0 or bool(standard)))
         band     = parse_wifi_band(p.get("WifiBand", ""), int(p.get("WifiChannel", -1)))
         link_spd = parse_link_speed(p.get("LinkSpeed", ""))
 

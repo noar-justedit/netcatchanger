@@ -48,8 +48,22 @@ NetCatChanger/
 │   ├── build_windows.bat    Build script (exe)
 │   ├── run_as_admin.bat     Launch without building
 │   └── debug.bat            Debug launcher
+├── tests/                   Offline parsing checks (no Windows needed)
+│   └── test_parsing.py
 └── .github/workflows/       CI build (Windows runner via GitHub Actions)
 ```
+
+## Tests
+
+The parsing helpers run on any OS, Windows not required:
+
+```
+python tests/test_parsing.py
+```
+
+Covers the `netsh wlan show interfaces` parser against English, French and
+German output, band / standard / link-speed normalisation, and PowerShell
+quoting.
 
 ## License
 

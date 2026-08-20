@@ -1,13 +1,13 @@
 # UTF-8
 #
-# Version metadata for NetworkProfileSwitcher.exe
-# Used by PyInstaller via --version-file
+# Version metadata for NetCatChanger.exe
+# Passed to PyInstaller via --version-file (see scripts/build_windows.bat)
 #
 
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 0, 1, 0),
-    prodvers=(2, 0, 1, 0),
+    filevers=(2, 0, 2, 0),
+    prodvers=(2, 0, 2, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -21,14 +21,14 @@ VSVersionInfo(
         StringTable(
           u'040C04B0',
           [
-            StringStruct(u'CompanyName',      u''),
-            StringStruct(u'FileDescription',  u'Network Profile Switcher'),
-            StringStruct(u'FileVersion',      u'2.0.1.0'),
-            StringStruct(u'InternalName',     u'NetworkProfileSwitcher'),
-            StringStruct(u'LegalCopyright',   u''),
-            StringStruct(u'OriginalFilename', u'NetworkProfileSwitcher.exe'),
-            StringStruct(u'ProductName',      u'Network Profile Switcher'),
-            StringStruct(u'ProductVersion',   u'2.0.1.0'),
+            StringStruct(u'CompanyName',      u'just edit'),
+            StringStruct(u'FileDescription',  u'NetCatChanger - Network Profile Manager'),
+            StringStruct(u'FileVersion',      u'2.0.2.0'),
+            StringStruct(u'InternalName',     u'NetCatChanger'),
+            StringStruct(u'LegalCopyright',   u'Copyright (C) 2026 just edit - GNU GPL v3.0 or later'),
+            StringStruct(u'OriginalFilename', u'NetCatChanger.exe'),
+            StringStruct(u'ProductName',      u'NetCatChanger'),
+            StringStruct(u'ProductVersion',   u'2.0.2.0'),
           ]
         )
       ]
