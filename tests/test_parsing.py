@@ -14,6 +14,7 @@ for name in ("tkinter", "tkinter.messagebox"):
     mod = types.ModuleType(name)
     sys.modules.setdefault(name, mod)
 sys.modules["tkinter"].Tk = type("Tk", (), {})
+sys.modules["tkinter"].Canvas = type("Canvas", (), {})
 sys.modules["tkinter"].messagebox = sys.modules["tkinter.messagebox"]
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -176,6 +177,138 @@ check("quote inject", ns.ps_quote('"; Remove-Item C:\\ #'), "'\"; Remove-Item C:
 
 # --- guard rails ------------------------------------------------------------
 check("bad category rejected", ns.set_network_profile("Wi-Fi", "Nonsense; rm -rf"), False)
+
+# --- 2.1.0 helpers ----------------------------------------------------------
+check("semver gt",        ns.semver_gt("2.1.0", "2.0.2"), True)
+check("semver lt",        ns.semver_gt("2.0.2", "2.1.0"), False)
+check("semver eq",        ns.semver_gt("2.1.0", "2.1.0"), False)
+check("semver 10",        ns.semver_gt("2.10.0", "2.9.9"), True)
+
+check("mask /24",  ns.prefix_to_mask(24), "255.255.255.0")
+check("mask /16",  ns.prefix_to_mask(16), "255.255.0.0")
+check("mask /25",  ns.prefix_to_mask(25), "255.255.255.128")
+check("mask /8",   ns.prefix_to_mask(8),  "255.0.0.0")
+check("mask /32",  ns.prefix_to_mask(32), "255.255.255.255")
+check("mask /0",   ns.prefix_to_mask(0),  "0.0.0.0")
+check("mask bad",  ns.prefix_to_mask(-1), "")
+check("mask junk", ns.prefix_to_mask("x"), "")
+
+check("ip ok",       ns.valid_ip("192.168.10.5"), True)
+check("ip bad oct",  ns.valid_ip("192.168.10.256"), False)
+check("ip short",    ns.valid_ip("192.168.10"), False)
+check("ip leading0", ns.valid_ip("192.168.010.5"), False)
+check("ip empty",    ns.valid_ip(""), False)
+check("ip text",     ns.valid_ip("abc.def.ghi.jkl"), False)
+
+check("apipa yes", ns.is_apipa("169.254.12.7"), True)
+check("apipa no",  ns.is_apipa("192.168.1.10"), False)
+check("apipa nil", ns.is_apipa(""), False)
+
+# capture_ip_config builds a coherent rollback snapshot
+snap = ns.capture_ip_config({
+    "DhcpEnabled": False, "IPv4Address": "192.168.10.5", "PrefixLength": 24,
+    "Gateway": "192.168.10.1", "Dns": "1.1.1.1,8.8.8.8"})
+check("snap dhcp", snap["dhcp"], False)
+check("snap ip",   snap["ip"], "192.168.10.5")
+check("snap mask", snap["mask"], "255.255.255.0")
+check("snap gw",   snap["gw"], "192.168.10.1")
+check("snap dns",  snap["dns"], ["1.1.1.1", "8.8.8.8"])
+
+snap2 = ns.capture_ip_config({"DhcpEnabled": True, "IPv4Address": "N/A",
+                              "PrefixLength": -1, "Gateway": "", "Dns": ""})
+check("snap2 dhcp", snap2["dhcp"], True)
+check("snap2 dns",  snap2["dns"], [])
+
+# --- elevation (run_as_admin) -----------------------------------------------
+# ShellExecuteW returns > 32 on success; 5 (SE_ERR_ACCESSDENIED) is what a
+# refused UAC prompt gives back. Anything <= 32 must keep us in read-only.
+class _FakeShell:
+    def __init__(self, rc): self.rc, self.calls = rc, []
+    def ShellExecuteW(self, hwnd, verb, exe, params, cwd, show):
+        self.calls.append((verb, exe, params))
+        return self.rc
+
+class _FakeCtypes:
+    def __init__(self, rc): self.windll = type("W", (), {"shell32": _FakeShell(rc)})()
+
+def _elevate_with(rc, argv, frozen=False):
+    real_ctypes, real_argv, real_frozen = ns.ctypes, sys.argv, getattr(sys, "frozen", None)
+    ns.ctypes = _FakeCtypes(rc)
+    sys.argv = argv
+    if frozen: sys.frozen = True
+    try:
+        ok = ns.run_as_admin()
+        return ok, ns.ctypes.windll.shell32.calls
+    finally:
+        ns.ctypes, sys.argv = real_ctypes, real_argv
+        if frozen and real_frozen is None: del sys.frozen
+
+ok, calls = _elevate_with(42, ["ncc.py"])
+check("elevate accepted", ok, True)
+check("elevate uses runas", calls[0][0], "runas")
+check("elevate adds guard flag", ns.NO_ELEVATE_FLAG in calls[0][2], True)
+check("elevate passes script", "ncc.py" in calls[0][2], True)
+
+ok, _ = _elevate_with(5, ["ncc.py"])          # user clicked "No"
+check("elevate refused -> False", ok, False)
+ok, _ = _elevate_with(32, ["ncc.py"])         # boundary
+check("elevate rc=32 -> False", ok, False)
+ok, _ = _elevate_with(33, ["ncc.py"])
+check("elevate rc=33 -> True", ok, True)
+
+ok, calls = _elevate_with(42, ["ncc.py", ns.NO_ELEVATE_FLAG, "--minimized"])
+check("guard flag not duplicated", calls[0][2].count(ns.NO_ELEVATE_FLAG), 1)
+check("other args kept", "--minimized" in calls[0][2], True)
+
+ok, calls = _elevate_with(42, ["NetCatChanger.exe", "--minimized"], frozen=True)
+check("frozen keeps args", "--minimized" in calls[0][2], True)
+check("frozen guards too", ns.NO_ELEVATE_FLAG in calls[0][2], True)
+
+# a broken ctypes must never crash the launch
+real = ns.ctypes
+ns.ctypes = None
+try:
+    check("elevate on error -> False", ns.run_as_admin(), False)
+finally:
+    ns.ctypes = real
+
+# --- should_elevate: the anti-loop guard ------------------------------------
+check("elevate: plain windows launch",
+      ns.should_elevate(["ncc.exe"], "win32", False), True)
+check("elevate: already admin",
+      ns.should_elevate(["ncc.exe"], "win32", True), False)
+check("elevate: relaunched copy never re-asks",
+      ns.should_elevate(["ncc.exe", ns.NO_ELEVATE_FLAG], "win32", False), False)
+check("elevate: not on linux",
+      ns.should_elevate(["ncc.py"], "linux", False), False)
+check("elevate: autostart launch still elevates",
+      ns.should_elevate(["ncc.exe", "--minimized"], "win32", False), True)
+
+# --- autostart uses a scheduled task, not HKCU\Run --------------------------
+_cmds = []
+_real_run_cmd = ns.run_cmd
+ns.LOG_ENABLED = False        # keep the test from writing a real session log
+ns.run_cmd = lambda args: (_cmds.append(args) or (True, ""))
+try:
+    ns.autostart_set(True)
+    create = _cmds[-1]
+    check("autostart uses schtasks", create[0], "schtasks")
+    check("autostart creates", create[1], "/Create")
+    check("autostart highest privileges", "HIGHEST" in create, True)
+    check("autostart at logon", "ONLOGON" in create, True)
+    check("autostart starts minimized", "--minimized" in create[create.index("/TR") + 1], True)
+    _cmds.clear()
+    ns.autostart_set(False)
+    check("autostart delete", _cmds[-1][1], "/Delete")
+finally:
+    ns.run_cmd = _real_run_cmd
+
+# removing an absent task is a success, not a failure
+ns.run_cmd = lambda args: (False, "ERROR: The system cannot find the file specified.")
+try:
+    check("autostart remove-absent is ok", ns.autostart_set(False), True)
+finally:
+    ns.run_cmd = _real_run_cmd
 
 # --- report -----------------------------------------------------------------
 if fails:
