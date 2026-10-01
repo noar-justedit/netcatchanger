@@ -2,7 +2,7 @@
 
 Windows Network Profile Manager + Firewall Control
 
-![NetCatChanger screenshot](assets/ui_final.png)
+![NetCatChanger screenshot](assets/screenshot.png)
 
 ## Features
 
