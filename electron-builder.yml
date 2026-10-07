@@ -1,0 +1,50 @@
+appId: fr.just-edit.netcatchanger
+productName: NetCatChanger
+copyright: "Copyright © 2026 Just Edit"
+compression: maximum
+asar: true
+# Nothing in NetCatChanger compiles: no native module, nothing to rebuild.
+npmRebuild: false
+
+# Electron itself (about 150 MB) is NOT downloaded by electron-builder: its
+# download gives up after 10 minutes in total, too short for a slow link to
+# GitHub (first build on SERVAL, 06.10.2026). scripts/fetch-electron.js gets
+# it once with curl (resumable, checksum verified) and build_windows.cmd
+# passes the folder on the command line:  -c.electronDist="<folder>"
+
+directories:
+  buildResources: build-resources
+  output: dist
+files:
+  - src/**/*
+  - package.json
+  - version.json
+  - LICENSE
+  - LICENSE-lucide.txt
+# PowerShell cannot read a file inside the asar archive. The .ps1 scripts are
+# read by Node (which can) and passed to PowerShell as text, so they may stay
+# packed; nothing else needs unpacking.
+
+win:
+  icon: build-resources/icon.ico
+  # The app changes network profiles, IP settings and the firewall: it is
+  # useless without administrator rights. Windows asks once at launch, and
+  # refusing the prompt simply does not open the app (no read-only mode).
+  requestedExecutionLevel: requireAdministrator
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: true
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  shortcutName: NetCatChanger
+  license: LICENSE
+  # Migration from 2.x (Inno Setup): see build-resources/installer.nsh
+  include: build-resources/installer.nsh
+  artifactName: "NetCatChanger-Setup-${version}.exe"

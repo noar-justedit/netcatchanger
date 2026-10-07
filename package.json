@@ -1,0 +1,27 @@
+{
+  "name": "netcatchanger",
+  "productName": "NetCatChanger",
+  "version": "3.0.0",
+  "description": "Windows network profile manager and firewall control",
+  "main": "src/main/main.js",
+  "author": "Just Edit <contact@just-edit.fr>",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noar-justedit/netcatchanger.git"
+  },
+  "homepage": "https://github.com/noar-justedit/netcatchanger",
+  "bugs": {
+    "url": "https://github.com/noar-justedit/netcatchanger/issues"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "test": "node test/run-tests.js",
+    "build:win": "electron-builder --config electron-builder.yml --win --x64"
+  },
+  "devDependencies": {
+    "electron": "^43.7.7",
+    "electron-builder": "^26.15.3"
+  }
+}

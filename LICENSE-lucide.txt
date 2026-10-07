@@ -45,13 +45,22 @@ SOFTWARE.
 ---
 
 Icons used in NetCatChanger, taken verbatim from the lucide-static npm
-package v1.34.0 (https://lucide.dev):
+package v1.52.0 (https://lucide.dev):
 
-  wifi.svg          -> wireless adapter icons   (src/icons.py: wifi_*)
-  network.svg       -> wired adapter icons      (src/icons.py: wired_*)
-  shield-check.svg  -> firewall active          (src/icons.py: fw_on)
-  shield-off.svg    -> firewall disabled        (src/icons.py: fw_off)
+  wifi.svg          -> wireless adapter tile        (#i-wifi)
+  network.svg       -> wired adapter tile           (#i-network)
+  shield-check.svg  -> firewall active              (#i-shield-check)
+  shield-off.svg    -> firewall disabled / unknown  (#i-shield-off)
+  refresh-cw.svg    -> Refresh button               (#i-refresh)
+  eraser.svg        -> Flush DNS button             (#i-eraser)
+  file-text.svg     -> Session log button           (#i-file-text)
+  settings.svg      -> Settings button              (#i-settings)
+  route.svg         -> VPN exit card                (#i-route)
+  minus.svg         -> window: minimize             (#i-minus)
+  square.svg        -> window: maximize             (#i-square)
+  x.svg             -> window: close                (#i-x)
 
-The original SVG sources are kept in assets/lucide/. Only the stroke colour
-and the raster size were changed when pre-rendering them into src/icons.py;
-the artwork itself is unmodified.
+The original SVG sources are kept in assets/lucide/. Their path data is
+copied unchanged into src/renderer/index.html (one <symbol> per icon, ids
+in brackets above); only the stroke width of the three window-control
+icons is adjusted, the artwork itself is unmodified.

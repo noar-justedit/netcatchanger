@@ -1,0 +1,270 @@
+/*
+ * NetCatChanger — Windows network profile manager and firewall control
+ * Copyright (C) 2026 Just Edit (Arnaud Augst) — GPL-3.0-or-later
+ *
+ * Built on the shared UI charter of Noar's applications (charte-ui-noar.md,
+ * set on ingesto 2.7.0). The rule: grouping is carried by the BACKGROUND,
+ * never by a line. Three surfaces — page, card, the hollow inside a card —
+ * plus --raise for what floats above. The only outline left is one that
+ * states something: a selection, keyboard focus, an alarm.
+ */
+
+/* ── Tokens ───────────────────────────────────────────────────────────── */
+:root{
+  /* surfaces */
+  --page:#0a0b0e; --card:#14161c; --ins:#0e1014; --raise:#1b1d24;
+  /* text */
+  --text:#e8eaf0; --text2:#aeb3bd; --text3:#8b909b; --text4:#6f757f;
+  /* states, common to every app of the family */
+  --red:#f2555a; --blue:#4d90f0; --green:#35c98b;
+  /* Colours (Noar, 10.2026): blue for what is chosen (current profile, VPN,
+     switches); badges grey by default, GREEN when the thing they name works
+     (Internet, link, DHCP, gateway, tunnel), RED when it does not (cable
+     unplugged, no DHCP answer, gateway silent); the icon of a connected
+     adapter is green. Orange and violet are not used. */
+  /* accent: NetCatChanger's own brand colour, the pink of its mark
+     (assets/NetCatChanger.svg), chosen by Noar 10.2026. Logo only. */
+  --accent:#ff0062;
+  /* radii */
+  --r-card:14px; --r-ins:11px; --r-field:8px; --r-badge:4px;
+  /* fonts */
+  --font:'Segoe UI Variable Text','Segoe UI',-apple-system,BlinkMacSystemFont,'Inter',system-ui,sans-serif;
+  --mono:'Cascadia Mono',Consolas,ui-monospace,'SF Mono','JetBrains Mono',Menlo,monospace;
+  --font-logo:'Poppins','Segoe UI',sans-serif;
+  --focus:inset 0 0 0 1px rgba(255,255,255,.18);
+}
+@font-face{font-family:'Poppins';src:url('fonts/Poppins-Bold.ttf') format('truetype');
+  font-weight:700;font-style:normal;font-display:swap;}
+
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;background:var(--page);color:var(--text);
+  font-family:var(--font);font-size:12.5px;overflow:hidden;
+  user-select:none;-webkit-user-select:none;}
+button{font-family:inherit;}
+.mono{font-family:var(--mono);}
+#app{display:flex;flex-direction:column;height:100vh;}
+
+/* ── Title bar ────────────────────────────────────────────────────────── */
+#titlebar{height:52px;flex-shrink:0;display:flex;align-items:center;gap:10px;
+  padding:0 8px 0 16px;-webkit-app-region:drag;}
+.t-logo{display:flex;align-items:center;gap:9px;font-family:var(--font-logo);
+  font-size:21px;font-weight:700;letter-spacing:.01em;text-transform:lowercase;color:var(--text);}
+.t-logo .cat{color:var(--accent);}
+.t-mark{width:22px;height:22px;flex-shrink:0;}
+.t-spacer{flex:1;}
+.t-actions{display:flex;align-items:center;gap:6px;-webkit-app-region:no-drag;}
+.t-actions .badge{margin-right:4px;}
+/* Icon-only button: a 28 px square on --card, radius 8 (charter). */
+.ibtn{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;
+  background:var(--card);border:none;border-radius:8px;color:var(--text2);cursor:pointer;}
+.ibtn:hover:not(:disabled){color:var(--text);}
+.ibtn:disabled{opacity:.4;cursor:default;}
+.ibtn svg{width:15px;height:15px;}
+.ibtn:focus-visible{outline:none;box-shadow:var(--focus);}
+.ibtn.spin svg{animation:spin .9s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+#wincontrols{display:flex;gap:2px;margin-left:6px;-webkit-app-region:no-drag;}
+#wincontrols button{width:36px;height:30px;border:0;background:transparent;color:var(--text3);
+  cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:6px;}
+#wincontrols button:hover{background:var(--raise);color:var(--text);}
+#wincontrols button.close:hover{background:var(--red);color:#fff;}
+#wincontrols svg{width:13px;height:13px;}
+
+/* ── Page ─────────────────────────────────────────────────────────────── */
+#main{flex:1;min-height:0;overflow-y:auto;padding:2px 12px 12px;
+  display:flex;flex-direction:column;gap:12px;
+  scrollbar-width:thin;scrollbar-color:#2a2d36 transparent;}
+#main::-webkit-scrollbar{width:8px;}
+#main::-webkit-scrollbar-thumb{background:#2a2d36;border-radius:8px;}
+
+/* Label: capitals 10/700, fixed 12 px height (charter). */
+.lbl{display:flex;align-items:center;gap:6px;height:12px;line-height:12px;
+  font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);}
+.sec-title{padding:0 4px;margin-bottom:-4px;}
+.sec-title .count{font-family:var(--mono);letter-spacing:0;color:var(--text4);}
+
+.card{background:var(--card);border-radius:var(--r-card);padding:14px 16px;}
+/* The one outline the charter allows on a card: an alarm. */
+.card.alert{box-shadow:inset 0 0 0 1px rgba(242,85,90,.55);}
+
+/* ── Badge: one template, the colour carries the meaning ──────────────── */
+.badge{display:inline-flex;align-items:center;gap:4px;height:18px;
+  font-size:9.5px;font-weight:700;letter-spacing:.06em;
+  padding:0 6px;border-radius:var(--r-badge);white-space:nowrap;
+  color:var(--text2);background:rgba(174,179,189,.13);}
+.badge.red   {color:var(--red);   background:rgba(242,85,90,.15);}
+.badge.green {color:var(--green); background:rgba(53,201,139,.15);}
+.badge.blue  {color:var(--blue);  background:rgba(77,144,240,.15);}
+
+/* ── Tile: a hollow, tinted by the state it shows ─────────────────────── */
+.tile{width:40px;height:40px;border-radius:var(--r-ins);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--ins);color:var(--text4);}
+.tile svg{width:20px;height:20px;}
+.tile.red   {background:rgba(242,85,90,.15);  color:var(--red);}
+.tile.blue  {background:rgba(77,144,240,.15); color:var(--blue);}
+.tile.green {background:rgba(53,201,139,.15); color:var(--green);}
+
+/* ── Buttons: discreet ─────────────────────────────────────────────────── */
+.btn{background:var(--ins);border:none;border-radius:9px;padding:6px 12px;
+  font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;white-space:nowrap;}
+.btn:hover:not(:disabled){color:var(--text);}
+.btn:disabled{opacity:.45;cursor:default;}
+.btn:focus-visible{outline:none;box-shadow:var(--focus);}
+
+/* ── Switch: 34 × 20, 14 px knob (charter) ────────────────────────────── */
+.switch{position:relative;width:34px;height:20px;border-radius:20px;flex-shrink:0;
+  background:var(--ins);box-shadow:inset 0 0 0 1px rgba(255,255,255,.09);
+  border:none;cursor:pointer;transition:background .15s;}
+.switch::before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;
+  border-radius:50%;background:#5c6270;transition:transform .15s,background .15s;}
+.switch.on{background:var(--blue);box-shadow:none;}
+.switch.on::before{transform:translateX(14px);background:var(--text);}
+.switch:disabled{cursor:default;opacity:.6;}
+.switch:focus-visible{outline:none;box-shadow:inset 0 0 0 1px rgba(255,255,255,.4);}
+
+/* ── Firewall card ────────────────────────────────────────────────────── */
+.fw,.vpn{display:flex;align-items:center;gap:14px;}
+.fw .what,.vpn .what{flex:1;min-width:0;}
+.obj-name{font-size:16px;font-weight:600;letter-spacing:-.2px;color:var(--text);}
+.fw .state,.vpn .state{margin-top:3px;font-size:12.5px;color:var(--text3);}
+.vpn .state.sub{margin-top:2px;font-size:11.5px;}
+.vpn .state.blue{color:var(--blue);} .vpn .state.red{color:var(--red);}
+.fw .state.blue{color:var(--blue);} .fw .state.red{color:var(--red);}
+.fw .ctl,.vpn .ctl{display:flex;align-items:center;gap:10px;}
+
+/* ── Adapter card ─────────────────────────────────────────────────────── */
+.ad{display:grid;grid-template-columns:40px minmax(0,1fr) auto auto;column-gap:14px;}
+.ad > .switch{align-self:start;margin-top:2px;margin-left:4px;}
+.ad .body{min-width:0;display:flex;flex-direction:column;gap:7px;}
+.ad .head{display:flex;align-items:baseline;gap:10px;min-width:0;}
+.ad .head .obj-name{white-space:nowrap;}
+.ad .head .desc{font-size:11.5px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ad .head .obj-name.dim{color:var(--text2);}
+.badges{display:flex;flex-wrap:wrap;gap:5px;}
+.signal{display:flex;align-items:center;gap:8px;font-size:11.5px;}
+.signal .bar{width:120px;height:6px;border-radius:6px;background:var(--ins);overflow:hidden;}
+.signal .bar i{display:block;height:100%;border-radius:6px;}
+.acts{display:flex;gap:5px;flex-wrap:wrap;margin-top:1px;}
+
+.ad .side{display:flex;flex-direction:column;align-items:flex-end;gap:10px;min-width:220px;}
+.ips{display:grid;grid-template-columns:auto auto;column-gap:10px;row-gap:5px;align-items:center;}
+.ips .lbl{justify-content:flex-end;}
+.ips .v{font-family:var(--mono);font-size:14px;color:var(--text2);text-align:right;}
+.ips .v.none{color:var(--text4);}
+
+/* Public / Private as two badges (Noar, 10.2026): the current profile in
+   its colour, the other one grey; clicking the grey one switches. */
+.choice{display:flex;gap:6px;}
+.choice button.badge{border:none;height:22px;padding:0 9px;font-size:10px;font-family:var(--font);
+  cursor:pointer;color:var(--text4);background:rgba(174,179,189,.08);}
+.choice button.badge:hover:not(.on){color:var(--text2);background:rgba(174,179,189,.13);}
+.choice button.badge.on{cursor:default;}
+.choice button.badge.on{color:var(--blue);background:rgba(77,144,240,.15);}
+.choice button.badge:focus-visible{outline:none;box-shadow:var(--focus);}
+.managed{font-size:11.5px;color:var(--text3);text-align:right;}
+
+/* ── States of the list ───────────────────────────────────────────────── */
+.empty{padding:28px 16px;text-align:center;color:var(--text3);font-size:12.5px;line-height:1.6;}
+.empty b{color:var(--text);font-weight:600;}
+.empty .mono{color:var(--text4);font-size:11px;}
+
+/* ── Footer ───────────────────────────────────────────────────────────── */
+#footer{flex-shrink:0;display:flex;align-items:center;padding:6px 16px 8px;
+  font-family:var(--mono);font-size:11.5px;color:var(--text3);}
+#footer a{color:var(--text3);cursor:pointer;text-decoration:none;}
+#footer a:hover{color:var(--text2);}
+#footer .sp{flex:1;}
+#status.ok{color:var(--text3);} #status.busy{color:var(--text3);} #status.error{color:var(--red);}
+
+#adapters{display:flex;flex-direction:column;gap:12px;}
+
+/* ── Windows (dialogs): a card on a black veil (charter) ─────────────── */
+.veil{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.7);
+  display:flex;align-items:center;justify-content:center;padding:24px;}
+.dlg{width:420px;max-width:100%;background:var(--card);border-radius:18px;
+  box-shadow:0 30px 80px rgba(0,0,0,.6);padding:20px;display:flex;flex-direction:column;gap:14px;}
+.dlg-title{font-size:18px;font-weight:600;letter-spacing:-.3px;}
+.dlg-text{font-size:12.5px;line-height:1.55;color:var(--text2);}
+.dlg-text b{color:var(--text);font-weight:600;}
+.dlg-btns{display:flex;gap:8px;margin-top:4px;}
+.dlg-btns button{flex:1;}
+/* Main action: full width, radius 14, tinted with its state colour. */
+.act{border:none;border-radius:var(--r-card);padding:11px 14px;font-size:12.5px;font-weight:700;
+  letter-spacing:.02em;cursor:pointer;background:var(--ins);color:var(--text2);}
+.act:hover:not(:disabled){color:var(--text);}
+.act.red{background:#341819;color:var(--red);}
+.act.blue{background:#15233a;color:var(--blue);}
+.act:disabled{opacity:.45;cursor:default;}
+.act:focus-visible{outline:none;box-shadow:var(--focus);}
+
+/* Field (charter): a hollow, no border; focus = a faint inner line. */
+.field{width:100%;background:var(--ins);border:none;border-radius:var(--r-field);
+  padding:9px 10px;color:var(--text);font-family:var(--font);font-size:14px;outline:none;
+  user-select:text;-webkit-user-select:text;}
+.field:focus{box-shadow:var(--focus);}
+.field-wrap{display:flex;flex-direction:column;gap:6px;}
+
+/* A list of choices: the chosen one is the only one on a surface. */
+.opts{display:flex;flex-direction:column;gap:2px;}
+.opt{display:flex;align-items:center;gap:10px;border:none;background:transparent;text-align:left;
+  border-radius:var(--r-ins);padding:10px 12px;color:var(--text2);font-size:12.5px;cursor:pointer;}
+.opt:hover:not(.on){color:var(--text);}
+.opt.on{background:var(--ins);color:var(--text);}
+.opt .tick{margin-left:auto;color:var(--blue);font-weight:700;visibility:hidden;}
+.opt.on .tick{visibility:visible;}
+.opt small{display:block;color:var(--text3);font-size:11.5px;margin-top:2px;}
+
+/* ── Toast: floats above, on --raise ─────────────────────────────────── */
+#toast{position:fixed;left:50%;bottom:44px;transform:translateX(-50%);z-index:60;
+  background:var(--raise);border-radius:12px;box-shadow:0 18px 44px rgba(0,0,0,.6);
+  padding:10px 14px;display:flex;align-items:center;gap:14px;font-size:12.5px;max-width:80%;}
+#toast.err{color:var(--red);}
+#toast button{border:none;background:transparent;color:var(--text);font-weight:700;
+  font-size:12.5px;cursor:pointer;text-decoration:underline;padding:0;}
+.busy-lock .choice button,.busy-lock .acts .btn,.busy-lock .ad .switch,.busy-lock #fw-switch,.busy-lock .vpn .ctl button{pointer-events:none;opacity:.6;}
+
+/* ── IP settings, settings, about ────────────────────────────────────── */
+.dlg.wide{width:480px;}
+.ipgrid{display:grid;grid-template-columns:92px 1fr;column-gap:12px;row-gap:7px;align-items:center;}
+.ipgrid .lbl{margin:0;}
+.ipgrid.off{opacity:.45;}
+.field.mono{font-family:var(--mono);font-size:13px;padding:7px 10px;}
+.field:disabled{cursor:default;}
+/* The one outline a field may carry besides focus: an alarm. */
+.field.bad{box-shadow:inset 0 0 0 1px rgba(242,85,90,.7);}
+.dlg-err{min-height:15px;font-size:11.5px;color:var(--red);margin-top:-6px;}
+select.field{font-size:12.5px;padding:7px 10px;color:var(--text2);appearance:none;cursor:pointer;}
+select.field option{background:var(--raise);color:var(--text);}
+.presets{display:flex;flex-direction:column;gap:6px;}
+.prow{display:flex;gap:6px;}
+.prow .field{flex:1;font-size:12.5px;padding:7px 10px;}
+.countdown{color:var(--text3);font-variant-numeric:tabular-nums;}
+.set-list{display:flex;flex-direction:column;gap:6px;}
+.set-row{display:flex;align-items:center;gap:12px;background:var(--ins);border-radius:var(--r-ins);padding:10px 12px;}
+.set-txt{flex:1;font-size:12.5px;}
+.set-txt small{display:block;color:var(--text3);font-size:11.5px;margin-top:2px;}
+.about{display:flex;flex-direction:column;gap:5px;background:var(--ins);border-radius:var(--r-ins);
+  padding:12px;font-size:11.5px;color:var(--text3);line-height:1.5;user-select:text;-webkit-user-select:text;}
+.about-name{font-size:14px;font-weight:600;color:var(--text);}
+.about-name .mono{font-size:12px;color:var(--text3);font-weight:400;}
+.about-link{color:var(--text2);cursor:pointer;font-family:var(--mono);font-size:11.5px;}
+.about-link:hover{color:var(--text);}
+.dlg{max-height:calc(100vh - 48px);overflow-y:auto;}
+
+.vpn-sec{display:flex;flex-direction:column;gap:6px;}
+.dlg-note{font-size:11.5px;line-height:1.5;color:var(--text3);background:var(--ins);border-radius:var(--r-ins);padding:10px 12px;}
+
+/* VPN card buttons: the fix the user needs is the one main action. */
+.btn.primary{background:rgba(77,144,240,.15);color:var(--blue);}
+.btn.primary:hover:not(:disabled){color:#7fb0f5;}
+
+/* Context menu (charter: floats on --raise, radius 12). */
+.ctxmenu{position:fixed;z-index:70;min-width:150px;background:var(--raise);border-radius:12px;
+  box-shadow:0 18px 44px rgba(0,0,0,.6);padding:5px;display:flex;flex-direction:column;}
+.ctx-it{border:none;background:transparent;text-align:left;color:var(--text2);font-size:12.5px;
+  padding:7px 10px;border-radius:8px;cursor:pointer;}
+.ctx-it:hover,.ctx-it:focus-visible{background:rgba(255,255,255,.06);color:var(--text);outline:none;}
+.ad .obj-name{cursor:context-menu;border-radius:4px;}
+.ad .obj-name:focus-visible{outline:none;box-shadow:var(--focus);}
+.renew-row{display:flex;align-items:center;gap:12px;background:var(--ins);border-radius:var(--r-ins);padding:10px 12px;}
