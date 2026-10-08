@@ -7,9 +7,9 @@ running in the background.
 
 ![NetCatChanger: network adapters, VPN and firewall](docs/screenshots/main.png)
 
-| IP settings, with presets and automatic undo |
-|---|
-| ![IP settings](docs/screenshots/ip-settings.png) |
+| IP settings, with presets and automatic undo | Secondary addresses |
+|---|---|
+| ![IP settings](docs/screenshots/ip-settings.png) | ![Secondary addresses](docs/screenshots/secondary.png) |
 
 ## Download
 
@@ -32,13 +32,21 @@ Windows SmartScreen may warn on first launch (the installer is not signed):
 - **IP settings**: DHCP or a fixed address (IP, mask, gateway, two DNS),
   saved **presets**, and an automatic return to the previous settings after
   15 seconds unless you confirm, in case the change cuts you off.
+- **Secondary IP**: a second fixed address on another range next to the DHCP
+  one, to reach a NAS or event equipment without losing the Internet. One
+  ON / OFF switch per address, presets, never a gateway, duplicates refused
+  (Windows 10 2004 or later).
+- **Use for Internet**: Wi-Fi and Ethernet both connected, one click picks
+  which one carries the Internet (and the VPN); the other keeps its local
+  network. Automatic again in one click, or when Windows restarts.
 - **Turn an adapter on / off** with its switch, **rename** it (right-click on
   its name), **renew** a DHCP lease (in IP settings), **flush DNS**.
 - **Windows Firewall** on / off, for the active profiles only or for all.
 - **VPN** (WireGuard): while a tunnel runs, shows which connection it uses
   and whether its server answers. If a network blocks it, one click sends it
-  through another connection (the Wi-Fi, say); the first one keeps working
-  for everything else, and a restart of Windows puts things back by itself.
+  through another connection (the Wi-Fi, say), like "Use for Internet"; the
+  first one keeps working for everything else, and a restart of Windows puts
+  things back by itself.
 - **Session log** of every change in `%APPDATA%\NetCatChanger\session.log`.
 - The live window refreshes by itself when something changes in Windows.
 

@@ -29,9 +29,9 @@
 
 'use strict';
 
-const { runPsAction, runCmd } = require('./ps');
+const { runPs, runPsAction, runCmd } = require('./ps');
 const { logEvent } = require('./store');
-const { validIp, validMask } = require('./netinfo');
+const { validIp, validMask, prefixToMask } = require('./netinfo');
 
 // One adapter, by GUID, or a clear failure.
 const PICK = "$a = @(Get-NetAdapter | Where-Object { \"$($_.InterfaceGuid)\" -eq $env:NCC_GUID }); " +
@@ -165,7 +165,36 @@ async function restoreIp(alias, snap) {
   return applyStatic(alias, snap);
 }
 
+// ── Secondary IPv4 addresses (3.1.0): see ps/secondary.ps1 ────────────────
+// The address is checked by netinfo.checkSecondary() in main.js first.
+
+async function runSecondary(env) {
+  const r = await runPs('secondary.ps1', env, 45000);
+  try {
+    const o = JSON.parse(String(r.stdout).split(/\r?\n/).filter(Boolean).pop());
+    return { ok: o.ok === true, message: short(o.message), state: String(o.state || ''),
+             checked: o.checked === true, conflict: o.conflict === true, gone: o.gone === true };
+  } catch (_) {
+    return { ok: false, message: short(r.stderr) || 'PowerShell did not answer' };
+  }
+}
+
+async function addSecondary(guid, alias, ip, prefix) {
+  if (!validIp(ip) || !(prefix >= 1 && prefix <= 32)) return { ok: false, message: 'Invalid address' };
+  const r = await runSecondary({ NCC_OP: 'add', NCC_GUID: guid, NCC_IP: ip, NCC_MASK: prefixToMask(prefix) });
+  logEvent('secondary', `${alias} + ${ip}/${prefix} : ${r.ok ? 'ok' : (r.conflict ? 'CONFLICT ' : 'FAILED ') + r.message}`);
+  return r;
+}
+
+async function removeSecondary(guid, alias, ip, why) {
+  if (!validIp(ip)) return { ok: false, message: 'Invalid address' };
+  const r = await runSecondary({ NCC_OP: 'remove', NCC_GUID: guid, NCC_IP: ip });
+  logEvent('secondary', `${alias} - ${ip}${why ? ' (' + why + ')' : ''} : ${r.ok ? 'ok' : 'FAILED ' + r.message}`);
+  return r;
+}
+
 module.exports = {
+  addSecondary, removeSecondary,
   applyDhcp, applyStatic, restoreIp, checkStatic,
   setProfile, setAdapterEnabled, renameAdapter, renewDhcp, flushDns, setFirewall,
   validNewName, CATEGORIES, FW_PROFILES,

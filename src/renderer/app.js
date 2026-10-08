@@ -456,6 +456,246 @@ async function openIpSettings(a) {
   load();
 }
 
+// ── Secondary addresses (3.1.0) ───────────────────────────────────────────
+// A fixed address next to the DHCP one (or the fixed one), never with a
+// gateway. ON / OFF on the card; adding, presets and removing in a window.
+
+function secLabel(s) { return `${s.ip}/${s.prefix}`; }
+function secProblem(s) {
+  if (s.problem === 'conflict') return ['IP CONFLICT', 'Another device on the network already uses this address'];
+  if (s.problem === 'range') return ['SAME RANGE AS DHCP', 'The DHCP address of this card is now in the same range: the network has changed'];
+  return null;
+}
+
+function miniSwitch(on, label, onClick) {
+  const sw = el('button', 'switch mini' + (on ? ' on' : ''));
+  sw.setAttribute('role', 'switch');
+  sw.setAttribute('aria-checked', on ? 'true' : 'false');
+  sw.setAttribute('aria-label', label);
+  sw.title = on ? 'Turn this address off (kept in the list)' : 'Turn this address back on';
+  sw.addEventListener('click', onClick);
+  return sw;
+}
+
+function secOnMessage(a, s, r) {
+  let m = `${secLabel(s)} on ${a.alias}`;
+  if (r.unchecked) m += ' · not checked for duplicates: the card is not connected';
+  else if (r.watching) m += ' · checking the Internet for 15 s';
+  return m;
+}
+
+async function setSecondary(a, s, on) {
+  const r = await act(() => window.ncc.secSet(a.guid, s.ip, on), on ? null : `${secLabel(s)} off`,
+                      `Could not turn ${secLabel(s)} ${on ? 'on' : 'off'}`);
+  if (on && r && r.ok) toast(secOnMessage(a, s, r), { ms: 5000 });
+  return r;
+}
+
+// One secondary address as two cells of the card's address grid, so it
+// lines up with IPv4 / IPv6 / Gateway (Noar, 10.2026): its switch and name
+// in the label column, the address right-aligned in the value column.
+function secondaryCells(grid, a, s) {
+  const lbl = el('span', 'lbl sec-lbl' + (s.on ? '' : ' off'));
+  const pb = secProblem(s);
+  if (pb) { const b = badge(pb[0], 'red'); b.title = pb[1]; lbl.appendChild(b); }
+  const name = el('span', 'sec-name', s.name || 'Secondary');
+  if (s.name) name.title = s.name;
+  lbl.appendChild(name);
+  const v = el('span', 'v sec-v' + (s.on ? '' : ' off'));
+  v.appendChild(document.createTextNode(s.ip));
+  v.appendChild(el('span', 'px', '/' + s.prefix));
+  // Its switch to the right of the address, like the card's own (Noar).
+  const sw = el('span', 'sw-cell');
+  // Same size as the card's switch, in the same column.
+  const m = miniSwitch(s.on, `${secLabel(s)}: ${s.on ? 'on' : 'off'}`, () => setSecondary(a, s, !s.on));
+  m.classList.remove('mini');
+  sw.appendChild(m);
+  grid.append(lbl, v, sw);
+}
+
+// Waits for the reading in progress (and the one queued after it).
+function loadAndWait() {
+  return new Promise(res => {
+    load();
+    const tick = () => (loading || reloadAgain ? setTimeout(tick, 60) : res());
+    setTimeout(tick, 0);
+  });
+}
+
+async function secondaryDialog(start) {
+  let presets = [];
+  try { presets = (await window.ncc.secPresets()) || []; } catch (_) {}
+  return dialog((box, close) => {
+    let a = start;
+    const fresh = () => {
+      const d = lastData && lastData.ok ? lastData : null;
+      return d ? d.interfaces.find(x => x.guid === start.guid) || null : null;
+    };
+    const after = async r => {
+      await loadAndWait();
+      const n = fresh();
+      if (!n) { close(null); return r; }
+      a = n;
+      paint();
+      return r;
+    };
+
+    box.appendChild(el('div', 'dlg-title', 'Secondary addresses'));
+    const sub = el('div', 'dlg-text');
+    box.appendChild(sub);
+    const note = el('div', 'dlg-note');
+    box.appendChild(note);
+    const list = el('div', 'sec-list');
+    box.appendChild(list);
+
+    // Add: address, prefix (or mask), a name. No gateway, on purpose.
+    box.appendChild(el('span', 'sec-sub', 'Add an address'));
+    const add = el('div', 'sec-add');
+    const fIp = el('input', 'field mono'); fIp.placeholder = '192.168.50.20'; fIp.maxLength = 15; fIp.spellcheck = false;
+    const fPx = el('input', 'field mono'); fPx.value = '24'; fPx.maxLength = 15; fPx.spellcheck = false;
+    fPx.title = 'Prefix (24) or mask (255.255.255.0)';
+    const fName = el('input', 'field'); fName.placeholder = 'Name (optional)'; fName.maxLength = 60;
+    const bAdd = el('button', 'btn primary', 'Add');
+    add.append(fIp, fPx, fName, bAdd);
+    box.appendChild(add);
+    const err = el('div', 'dlg-err');
+    box.appendChild(err);
+    for (const f of [fIp, fPx, fName]) f.addEventListener('input', () => { f.classList.remove('bad'); err.textContent = ''; });
+
+    const prefixOf = v => {
+      const t = String(v || '').trim().replace(/^\//, '');
+      if (/^\d{1,2}$/.test(t)) return Number(t) >= 1 && Number(t) <= 32 ? Number(t) : -1;
+      if (!isMask(t)) return -1;
+      return t.split('.').map(Number).reduce((n, b) => n + (b.toString(2).match(/1/g) || []).length, 0);
+    };
+    const collect = () => {
+      const ip = fIp.value.trim(), px = prefixOf(fPx.value);
+      fIp.classList.toggle('bad', !isIp(ip));
+      fPx.classList.toggle('bad', px < 0);
+      if (!isIp(ip) || px < 0) { err.textContent = 'Check the fields outlined in red.'; return null; }
+      return { ip, prefix: px, name: fName.value.trim() };
+    };
+    const addNow = async c => {
+      err.textContent = '';
+      const r = await act(() => window.ncc.secAdd(a.guid, c), null, `Could not add ${c.ip}`);
+      if (r && r.ok) {
+        toast(secOnMessage(a, c, r), { ms: 5000 });
+        fIp.value = ''; fName.value = '';
+      } else if (r && r.message) {
+        err.textContent = r.message;
+      }
+      return after(r);
+    };
+    bAdd.addEventListener('click', () => { const c = collect(); if (c) addNow(c); });
+    fIp.dataset.autofocus = '1';
+
+    // Presets: one click adds the address on this card and turns it on.
+    box.appendChild(el('span', 'sec-sub', 'Presets'));
+    const chips = el('div', 'chips');
+    box.appendChild(chips);
+    const bSave = el('button', 'btn', 'Save the fields as a preset');
+    bSave.addEventListener('click', async () => {
+      const c = collect();
+      if (!c) return;
+      if (!c.name) { err.textContent = 'Give the preset a name.'; fName.classList.add('bad'); fName.focus(); return; }
+      const r = await window.ncc.saveSecPreset(c);
+      if (r && r.ok) { presets = r.presets; paint(); toast(`Preset “${c.name}” saved`); }
+      else err.textContent = (r && r.message) || 'Could not save the preset';
+    });
+    const saveRow = el('div', 'prow');
+    saveRow.appendChild(bSave);
+    box.appendChild(saveRow);
+
+    const orphanBox = el('div', 'sec-list');
+    box.appendChild(orphanBox);
+
+    const row = el('div', 'dlg-btns');
+    const bClose = el('button', 'act', 'Close');
+    bClose.addEventListener('click', () => close(null));
+    row.appendChild(bClose);
+    box.appendChild(row);
+
+    function paint() {
+      sub.replaceChildren(el('b', null, a.alias),
+        document.createTextNode(a.dhcp
+          ? ' · fixed addresses next to the DHCP one, without a gateway: the Internet stays on DHCP.'
+          : ' · addresses added to the fixed configuration of this card, without a gateway.'));
+      const blocked = a.dhcp && lastData && lastData.coexistence === false;
+      note.textContent = blocked
+        ? 'This version of Windows cannot keep a fixed address next to DHCP: Windows 10 version 2004 or later is needed.'
+        : 'OFF removes the address from Windows and keeps it here. If the card loses the Internet within 15 s of turning one on, it goes back off by itself.';
+      note.style.color = blocked ? 'var(--red)' : '';
+      for (const f of [fIp, fPx, fName, bAdd]) f.disabled = blocked;
+
+      list.replaceChildren();
+      const secs = a.secondary || [];
+      if (!secs.length) list.appendChild(el('div', 'sec-empty', 'No secondary address on this card yet.'));
+      for (const s of secs) {
+        const r = el('div', 'sec-row' + (s.on ? '' : ' off'));
+        r.appendChild(el('span', 'sec-ip', secLabel(s)));
+        r.appendChild(el('span', 'sec-name', s.name || (s.saved ? '' : 'added outside NetCatChanger')));
+        const pb = secProblem(s);
+        if (pb) { const b = badge(pb[0], 'red'); b.title = pb[1]; r.appendChild(b); }
+        r.appendChild(miniSwitch(s.on, `${secLabel(s)}: ${s.on ? 'on' : 'off'}`,
+          async () => after(await setSecondary(a, s, !s.on))));
+        const del = el('button', 'btn', 'Remove');
+        del.title = 'Remove from Windows and from this list';
+        del.addEventListener('click', async () => {
+          const r2 = await act(() => window.ncc.secForget(a.guid, s.ip), `${secLabel(s)} removed`, `Could not remove ${secLabel(s)}`);
+          after(r2);
+        });
+        r.appendChild(del);
+        list.appendChild(r);
+      }
+
+      chips.replaceChildren();
+      if (!presets.length) chips.appendChild(el('div', 'sec-empty', 'No preset yet: fill the fields, give a name, save.'));
+      for (const p of presets) {
+        const c = el('span', 'chip');
+        const b = el('button');
+        b.appendChild(document.createTextNode(p.name));
+        b.appendChild(el('span', 'mono', `${p.ip}/${p.prefix}`));
+        b.title = `Add ${p.ip}/${p.prefix} on ${a.alias} and turn it on`;
+        b.disabled = blocked;
+        b.addEventListener('click', () => addNow({ ip: p.ip, prefix: p.prefix, name: p.name }));
+        const x = el('button', 'x', '×');
+        x.title = `Delete the preset “${p.name}”`;
+        x.setAttribute('aria-label', x.title);
+        x.addEventListener('click', async () => {
+          const r = await window.ncc.deleteSecPreset(p.name);
+          if (r && r.ok) { presets = r.presets; paint(); toast(`Preset “${p.name}” deleted`); }
+        });
+        c.append(b, x);
+        chips.appendChild(c);
+      }
+
+      // Kept for a card that is no longer there (another adapter, a dock).
+      orphanBox.replaceChildren();
+      const orphans = (lastData && lastData.orphans) || [];
+      if (orphans.length) {
+        orphanBox.appendChild(el('span', 'sec-sub', 'Kept for cards no longer here'));
+        for (const o of orphans) {
+          const r = el('div', 'sec-row off');
+          r.appendChild(el('span', 'sec-ip', secLabel(o)));
+          r.appendChild(el('span', 'sec-name', [o.name, o.alias].filter(Boolean).join(' · ')));
+          const use = el('button', 'btn', 'Use here');
+          use.title = `Add it on ${a.alias}`;
+          use.disabled = blocked;
+          use.addEventListener('click', async () => {
+            const r2 = await addNow({ ip: o.ip, prefix: o.prefix, name: o.name });
+            if (r2 && r2.ok) { await window.ncc.secForget(o.guid, o.ip); after(r2); }
+          });
+          const forget = el('button', 'btn', 'Forget');
+          forget.addEventListener('click', async () => { await window.ncc.secForget(o.guid, o.ip); after({ ok: true }); });
+          r.append(use, forget);
+          orphanBox.appendChild(r);
+        }
+      }
+    }
+    paint();
+  }, { wide: true });
+}
+
 // ── Settings and About ────────────────────────────────────────────────────
 
 function settingRow(label, hint, key) {
@@ -556,7 +796,10 @@ function vpnButton(label, onClick, primary, title) {
 function renderVpn() {
   const view = vpnView();
   const section = $('vpn-section');
-  if (!view || (!view.tunnel && !view.on)) { section.hidden = true; return; }
+  // A route chosen with "Use for Internet" is shown on the cards; this card
+  // is for the VPN only (and a 3.0.0 VPN mode still on).
+  const legacyOn = view && view.on && view.v.journal && view.v.journal.method !== 'route';
+  if (!view || (!view.tunnel && !legacyOn)) { section.hidden = true; return; }
   section.hidden = false;
   const { v, tunnel, on } = view;
   const tile = $('vpn-tile'), st = $('vpn-state'), hint = $('vpn-hint'), acts = $('vpn-actions');
@@ -577,13 +820,20 @@ function renderVpn() {
     } else {
       st.textContent = `No answer from the VPN server through ${j.preferred.alias} either.`;
     }
-    hint.textContent = v.state === 'waiting'
-      ? `${j.retreat.alias} is unplugged.`
-      : `${j.retreat.alias} is not used for the VPN, but still works for the rest. ` +
-        'Everything goes back to normal when Windows restarts.';
+    if (j.retreat) {             // a 3.0.0 VPN mode still on
+      hint.textContent = v.state === 'waiting'
+        ? `${j.retreat.alias} is unplugged.`
+        : `${j.retreat.alias} is not used for the VPN, but still works for the rest. ` +
+          'Everything goes back to normal when Windows restarts.';
+    } else {
+      hint.textContent = v.state === 'waiting'
+        ? `${j.preferred.alias} is not connected: Windows uses another card meanwhile.`
+        : `Internet and the VPN go through ${j.preferred.alias}; the other cards still work for their local network. ` +
+          'Automatic again when Windows restarts.';
+    }
     if (tunnel && !answers) acts.appendChild(vpnButton('Try again', reconnectTunnel, false, 'Reconnect the VPN'));
     acts.appendChild(vpnButton('Back to normal', vpnBackToNormal, false,
-      `Let the VPN use ${j.retreat.alias} again`));
+      'Let Windows choose the connection again'));
     return;
   }
 
@@ -797,9 +1047,16 @@ function renderFirewall(fw) {
 
 // ── Adapter cards ─────────────────────────────────────────────────────────
 
-function ipRow(grid, label, value, cls) {
+// The address grid has three columns: label, address (right-aligned), and
+// a switch column: the card's own switch on the IPv4 row, each secondary
+// address's switch on its row, empty elsewhere. So every address ends on the
+// same edge and every switch sits in the same column (Noar, 10.2026).
+function ipRow(grid, label, value, cls, swEl) {
   grid.appendChild(el('span', 'lbl', label));
   grid.appendChild(el('span', 'v ' + (value ? (cls || '') : 'none'), value || 'none'));
+  const cell = el('span', 'sw-cell');
+  if (swEl) cell.appendChild(swEl);
+  grid.appendChild(cell);
 }
 
 function actionButton(text, onClick, title) {
@@ -807,6 +1064,29 @@ function actionButton(text, onClick, title) {
   b.addEventListener('click', onClick);
   if (title) b.title = title;
   return b;
+}
+
+// ── Internet route (3.1.0) ────────────────────────────────────────────────
+
+function routeView() {
+  const d = lastData;
+  const list = (d && d.ok && d.interfaces) || [];
+  const candidates = list.filter(a => !a.tunnel && a.status === 'Up' && a.gateway).map(a => a.guid);
+  const v = d && d.vpn;
+  const j = v && v.state !== 'off' ? v.journal : null;
+  return {
+    candidates, many: candidates.length > 1,
+    forced: j && j.method === 'route' ? j.preferred.guid : null,
+    auto: v && v.exit ? v.exit.guid : null,
+  };
+}
+
+async function routeUse(a) {
+  await act(() => window.ncc.routeSet(a.guid), `Internet now goes through ${a.alias}, until Windows restarts`,
+            `Could not send the Internet through ${a.alias}`, { ms: 5000 });
+}
+async function routeAuto() {
+  await act(() => window.ncc.routeAuto(), 'Automatic again: Windows chooses', 'Could not go back to automatic');
 }
 
 function adapterCard(a) {
@@ -871,9 +1151,34 @@ function adapterCard(a) {
                  Up: 'NO NETWORK PROFILE' }[a.status] || String(a.status || 'unknown').toUpperCase();
     badges.appendChild(badge(st, a.status === 'Disabled' ? '' : 'red'));
   }
+  // Which card carries the Internet when several could: blue when chosen
+  // here ("Use for Internet"), grey when it is Windows' own choice.
+  const rt = routeView();
+  if (rt.many && active) {
+    if (rt.forced && rt.forced === a.guid) {
+      const b = badge('INTERNET ROUTE', 'blue');
+      b.title = 'Chosen here: Internet traffic (and the VPN) goes through this card until Windows restarts';
+      badges.appendChild(b);
+    } else if (!rt.forced && rt.auto === a.guid) {
+      const b = badge('INTERNET ROUTE');
+      b.title = 'Windows sends Internet traffic through this card (its automatic choice)';
+      badges.appendChild(b);
+    }
+  }
   const vj = lastData && lastData.vpn && lastData.vpn.state !== 'off' ? lastData.vpn.journal : null;
-  if (vj && vj.preferred.guid === a.guid) badges.appendChild(badge('VPN', 'blue'));
+  if (vj && vj.method !== 'route' && vj.preferred.guid === a.guid) badges.appendChild(badge('VPN', 'blue'));
   if (a.apipa) badges.appendChild(badge('169.254 · NO DHCP ANSWER', 'red'));
+  // SECONDARY IP: green while one of its secondary addresses is on, grey
+  // when they are all off, red when one has a problem (Noar, 10.2026).
+  const secList = a.tunnel ? [] : (a.secondary || []);
+  if (secList.length) {
+    const bad = secList.some(x => x.problem);
+    const anyOn = secList.some(x => x.on);
+    const b = badge('SECONDARY IP', bad ? 'red' : (anyOn ? 'green' : ''));
+    b.title = bad ? 'A secondary address has a problem (see below)'
+      : anyOn ? `${secList.filter(x => x.on).length} secondary address(es) on` : 'Secondary addresses kept, all off';
+    badges.appendChild(b);
+  }
   if (a.tunnel) badges.appendChild(badge('TUNNEL', active ? 'green' : ''));
   body.appendChild(badges);
 
@@ -894,6 +1199,19 @@ function adapterCard(a) {
 
   const acts = el('div', 'acts');
   acts.appendChild(actionButton('IP settings', () => openIpSettings(a), 'DHCP or a fixed address, with presets'));
+  if (rt.many && rt.candidates.includes(a.guid)) {
+    if (rt.forced === a.guid) {
+      acts.appendChild(actionButton('Automatic', () => routeAuto(),
+        'Let Windows choose again which card carries the Internet'));
+    } else if (rt.forced || rt.auto !== a.guid) {
+      acts.appendChild(actionButton('Use for Internet', () => routeUse(a),
+        'Send Internet traffic (and the VPN) through this card, until Windows restarts'));
+    }
+  }
+  if (!a.tunnel) {
+    acts.appendChild(actionButton('Secondary IP', () => secondaryDialog(a),
+      'A second fixed address on another range, next to the DHCP one, without a gateway'));
+  }
   body.appendChild(acts);
   card.appendChild(body);
 
@@ -908,10 +1226,11 @@ function adapterCard(a) {
   sw.title = isOn ? 'Turn this adapter off' : 'Turn this adapter back on';
   sw.addEventListener('click', () => toggleAdapter(a));
   const ips = el('div', 'ips');
-  ipRow(ips, 'IPv4', a.ipv4, '');
+  ipRow(ips, 'IPv4', a.ipv4, '', sw);
   ipRow(ips, 'IPv6', a.ipv6, '');
   if (a.gateway) ipRow(ips, 'Gateway', a.gateway, '');
   side.appendChild(ips);
+  for (const s of (a.tunnel ? [] : (a.secondary || []))) secondaryCells(ips, a, s);
 
   if (active && (a.category === 'Private' || a.category === 'Public')) {
     const ch = el('div', 'choice');
@@ -935,7 +1254,6 @@ function adapterCard(a) {
     side.appendChild(el('div', 'managed', 'Managed by IT'));
   }
   card.appendChild(side);
-  card.appendChild(sw);
   return card;
 }
 
@@ -1047,6 +1365,10 @@ async function init() {
   // The watcher in the main process says when something moved; wait half a
   // second so a burst of changes becomes one reload.
   let t = null;
+  window.ncc.onSecondaryOff(d => {
+    toast(`${d.ip} turned back off: ${d.alias} lost the Internet after it was turned on`, { error: true, ms: 9000 });
+    load();
+  });
   window.ncc.onChanged(() => { clearTimeout(t); t = setTimeout(load, 500); });
 
   load();

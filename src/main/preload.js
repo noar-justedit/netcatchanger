@@ -40,6 +40,17 @@ contextBridge.exposeInMainWorld('ncc', {
   presets     : ()               => ipcRenderer.invoke('presets-get'),
   savePreset  : (preset)         => ipcRenderer.invoke('preset-save', preset),
   deletePreset: (name)           => ipcRenderer.invoke('preset-delete', name),
+  secAdd      : (guid, c)        => ipcRenderer.invoke('sec-add', guid, c),
+  secSet      : (guid, ip, on)   => ipcRenderer.invoke('sec-set', guid, ip, on),
+  secForget   : (guid, ip)       => ipcRenderer.invoke('sec-forget', guid, ip),
+  secPresets  : ()               => ipcRenderer.invoke('secpre-get'),
+  saveSecPreset: (p)             => ipcRenderer.invoke('secpre-save', p),
+  deleteSecPreset: (name)        => ipcRenderer.invoke('secpre-delete', name),
+  onSecondaryOff: (cb) => {
+    const f = (_e, d) => cb(d);
+    ipcRenderer.on('secondary-auto-off', f);
+    return () => ipcRenderer.removeListener('secondary-auto-off', f);
+  },
   setSetting  : (key, value)     => ipcRenderer.invoke('set-setting', key, value),
   dismissUpdate: (version)       => ipcRenderer.invoke('update-dismiss', version),
   onUpdate    : (cb) => {
@@ -49,6 +60,8 @@ contextBridge.exposeInMainWorld('ncc', {
   },
   vpnOn       : (preferredGuid)  => ipcRenderer.invoke('vpn-on', preferredGuid),
   vpnOff      : ()               => ipcRenderer.invoke('vpn-off'),
+  routeSet    : (guid)           => ipcRenderer.invoke('route-set', guid),
+  routeAuto   : ()               => ipcRenderer.invoke('route-auto'),
   restartTunnel: (name)          => ipcRenderer.invoke('vpn-restart-tunnel', name),
   openExternal: (url)      => ipcRenderer.invoke('open-external', url),
   openLog     : ()         => ipcRenderer.invoke('open-log'),

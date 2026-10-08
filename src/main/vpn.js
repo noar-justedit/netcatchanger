@@ -37,7 +37,7 @@
 
 const { runPs, runPsAction } = require('./ps');
 const { logEvent } = require('./store');
-const { RETREAT_METRIC } = require('./netinfo');
+const { RETREAT_METRIC, ROUTE_METRIC } = require('./netinfo');
 
 const PICK = "$a = @(Get-NetAdapter | Where-Object { \"$($_.InterfaceGuid)\" -eq $env:NCC_GUID }); " +
              "if ($a.Count -ne 1) { throw 'Adapter not found (unplugged or removed?)' }; ";
@@ -124,7 +124,48 @@ async function turnOn(prefs, saveJournal) {
   return { ok: true, journal };
 }
 
+// "Use for Internet" (3.1.0), also what the VPN card's "Use another
+// connection" does now. plan = { preferred:{guid,alias}, aside:[{guid,alias}] }.
+// Every priority touched is read and written in the journal first.
+async function routeOn(plan, saveJournal) {
+  const touched = [plan.preferred].concat(plan.aside || []);
+  const changed = [];
+  for (const t of touched) {
+    const snapshot = await readMetrics(t.guid);
+    if (!snapshot) return { ok: false, message: `Could not read the priority of ${t.alias}` };
+    changed.push({ guid: t.guid, alias: t.alias, snapshot });
+  }
+  const journal = { active: true, method: 'route', preferred: plan.preferred, changed,
+                    since: new Date().toISOString() };
+  if (!saveJournal(journal)) return { ok: false, message: 'Could not write the settings file' };
+  let r = await setMetric(plan.preferred.guid, ROUTE_METRIC);
+  for (const a of plan.aside || []) {
+    if (!r.ok) break;
+    r = await setMetric(a.guid, RETREAT_METRIC);
+  }
+  logEvent('route', `Internet via ${plan.preferred.alias}` +
+    ((plan.aside || []).length ? `, set aside ${plan.aside.map(a => a.alias).join(', ')}` : '') +
+    ` : ${r.ok ? 'ok' : 'FAILED ' + short(r.message)}`);
+  if (!r.ok) {
+    for (const c of changed) await restoreMetrics(c.guid, c.snapshot);
+    saveJournal(null);
+    return { ok: false, message: short(r.message) };
+  }
+  return { ok: true, journal };
+}
+
 async function turnOff(journal, saveJournal) {
+  if (journal && journal.method === 'route') {
+    let ok = true, message = '';
+    for (const c of journal.changed || []) {
+      const r = await restoreMetrics(c.guid, c.snapshot);
+      // A card that is gone took its priority with it: nothing to put back.
+      if (!r.ok && !/not found/i.test(r.message)) { ok = false; message = r.message; }
+    }
+    logEvent('route', `automatic again (was ${journal.preferred.alias}) : ${ok ? 'ok' : 'FAILED ' + short(message)}`);
+    if (ok) saveJournal(null);
+    return { ok, message: short(message) };
+  }
   if (!journal || !journal.retreat) { saveJournal(null); return { ok: true }; }
   const { method, retreat } = journal;
   const r = method === 'metric' ? await restoreMetrics(retreat.guid, journal.snapshot)
@@ -156,4 +197,4 @@ async function restartTunnel(name) {
   return { ok: r.ok, message: short(r.message) };
 }
 
-module.exports = { turnOn, turnOff, wireguard, restartTunnel, readMetrics, TUNNEL_RE };
+module.exports = { turnOn, routeOn, turnOff, wireguard, restartTunnel, readMetrics, TUNNEL_RE };

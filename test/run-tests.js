@@ -271,6 +271,89 @@ check('vpn state: adapter unplugged -> waiting', ni.vpnState(J, vlist.filter(a =
 check('vpn state: disable method on', ni.vpnState(Object.assign({}, J, { method: 'disable' }), vlist.map(a => a.guid === 'o' ? Object.assign({}, a, { status: 'Disabled' }) : a)).state, 'on');
 check('vpn state: disabled card re-enabled -> ended', ni.vpnState(Object.assign({}, J, { method: 'disable' }), vlist).state, 'ended');
 
+// ── secondary addresses (3.1.0) ──────────────────────────────────────────
+check('prefix: 24', ni.parsePrefix('24'), 24);
+check('prefix: /16', ni.parsePrefix('/16'), 16);
+check('prefix: mask', ni.parsePrefix('255.255.255.0'), 24);
+check('prefix: 33 refused', ni.parsePrefix('33'), -1);
+check('prefix: holed mask refused', ni.parsePrefix('255.0.255.0'), -1);
+check('prefix: empty refused', ni.parsePrefix(''), -1);
+
+const RAW2 = { netsh: '', adapters: [
+  { InterfaceAlias: 'OWC', Status: 'Up', HasProfile: true, NetworkCategory: 0, InterfaceGuid: '{C}',
+    DhcpEnabled: true, Gateway: '10.20.0.1', IPv4Address: '192.168.50.20', PrefixLength: 24,
+    IPv4List: [{ IPAddress: '192.168.50.20', PrefixLength: 24, PrefixOrigin: 'Manual', AddressState: 'Preferred' },
+               { IPAddress: '10.20.0.15', PrefixLength: 24, PrefixOrigin: 'Dhcp', AddressState: 'Preferred' }] },
+  { InterfaceAlias: 'Fixe', Status: 'Up', HasProfile: true, NetworkCategory: 1, InterfaceGuid: '{F}',
+    DhcpEnabled: false, Gateway: '172.16.0.1',
+    IPv4List: [{ IPAddress: '10.0.10.5', PrefixLength: 24, PrefixOrigin: 'Manual', AddressState: 'Preferred' },
+               { IPAddress: '172.16.0.9', PrefixLength: 16, PrefixOrigin: 'Manual', AddressState: 'Preferred' }] },
+  { InterfaceAlias: 'One', Status: 'Up', HasProfile: true, InterfaceGuid: '{O}', DhcpEnabled: true,
+    IPv4List: { IPAddress: '192.168.68.54', PrefixLength: 22, PrefixOrigin: 'Dhcp', AddressState: 'Preferred' } },
+] };
+const l2 = ni.buildInterfaces(RAW2);
+const o2 = l2.find(a => a.alias === 'OWC'), f2 = l2.find(a => a.alias === 'Fixe'), one = l2.find(a => a.alias === 'One');
+check('secondary: main address is the DHCP one, not the first listed (3.0.0 bug)', [o2.ipv4, o2.mask], ['10.20.0.15', '255.255.255.0']);
+check('secondary: the other one is secondary', o2.secondaries.map(x => x.ip), ['192.168.50.20']);
+check('secondary: fixed card, main = the gateway range', f2.ipv4, '172.16.0.9');
+check('secondary: fixed card, secondary = the other', f2.secondaries.map(x => x.ip), ['10.0.10.5']);
+check('secondary: one address (PowerShell unwraps it)', [one.ipv4, one.secondaries.length], ['192.168.68.54', 0]);
+check('secondary: snapshot keeps them (IP settings put them back)', ni.ipSnapshot(o2).secondaries, [{ ip: '192.168.50.20', prefix: 24 }]);
+
+check('secondary check: ok', ni.checkSecondary('192.168.1.250', 24, o2, l2), '');
+check('secondary check: network address', /network address/.test(ni.checkSecondary('192.168.1.0', 24, o2, l2)), true);
+check('secondary check: broadcast', /broadcast/.test(ni.checkSecondary('192.168.1.255', 24, o2, l2)), true);
+check('secondary check: /32 has no network address', ni.checkSecondary('192.168.1.0', 32, o2, l2), '');
+check('secondary check: same range as the DHCP address', /main address/.test(ni.checkSecondary('10.20.0.200', 24, o2, l2)), true);
+check('secondary check: wider range covering the DHCP one', /main address/.test(ni.checkSecondary('10.30.0.1', 8, o2, l2)), true);
+check('secondary check: same range as another card', /One/.test(ni.checkSecondary('192.168.69.10', 24, o2, l2)), true);
+check('secondary check: already on the card', /already on this card/.test(ni.checkSecondary('192.168.50.20', 24, o2, l2)), true);
+check('secondary check: used by another card', /Fixe/.test(ni.checkSecondary('10.0.10.5', 24, o2, l2)), true);
+check('secondary check: loopback refused', ni.checkSecondary('127.0.0.5', 8, o2, l2) !== '', true);
+check('secondary check: 169.254 refused', ni.checkSecondary('169.254.1.1', 16, o2, l2) !== '', true);
+check('secondary check: bad prefix', ni.checkSecondary('192.168.1.5', -1, o2, l2) !== '', true);
+
+const SAVED = [{ guid: '{C}', ip: '192.168.50.20', prefix: 24, name: 'Regie' },
+               { guid: '{C}', ip: '192.168.1.250', prefix: 24, name: 'NAS' },
+               { guid: '{X}', ip: '172.20.0.1', prefix: 16, name: 'other' }];
+const view = ni.secondaryView(o2, SAVED);
+check('secondary view: saved and present = on', view[0], { ip: '192.168.50.20', prefix: 24, name: 'Regie', on: true, state: 'Preferred', saved: true, problem: '' });
+check('secondary view: saved and absent = off', [view[1].ip, view[1].on], ['192.168.1.250', false]);
+check('secondary view: other cards not shown', view.length, 2);
+const o3 = Object.assign({}, o2, { secondaries: [{ ip: '10.9.9.9', prefix: 24, origin: 'Manual', state: 'Duplicate' }] });
+check('secondary view: added outside the app = on, not saved', ni.secondaryView(o3, []).map(x => [x.on, x.saved, x.problem]), [[true, false, 'conflict']]);
+const o4 = Object.assign({}, o2, { primary: { ip: '192.168.50.7', prefix: 24, origin: 'Dhcp' } });
+check('secondary view: new lease in the same range is flagged', ni.secondaryView(o4, SAVED)[0].problem, 'range');
+check('secondary view: no flag when off', ni.secondaryView(o4, SAVED)[1].problem, '');
+check('coexistence: Windows 10 2004', ni.coexistenceSupported('10.0.19041'), true);
+check('coexistence: Windows 10 1909', ni.coexistenceSupported('10.0.18363'), false);
+check('coexistence: Windows 11', ni.coexistenceSupported('10.0.22631'), true);
+check('coexistence: unknown', ni.coexistenceSupported(''), false);
+
+const secPs = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ps', 'secondary.ps1'), 'utf8');
+check('secondary script: never a gateway', /gateway/i.test(secPs.replace(/^\s*#.*$/gm, '')), false);
+check('secondary script: values only through env', /\$env:NCC_(OP|GUID|IP|MASK)/.test(secPs) && !/\$\{?[A-Z]+\}?\s*=\s*['"]\d/.test(secPs), true);
+check('secondary script: card matched exactly', /-InterfaceAlias|-Name\s/.test(secPs), false);
+check('secondary script: coexistence on before adding', secPs.indexOf('dhcpstaticipcoexistence=enabled') < secPs.indexOf('add address'), true);
+check('secondary script: lookups always counted through @() (PS 5.1 CIM objects have no .Count)',
+      /(?<!@)\(& \$find\)\.Count|\$x = & \$find/.test(secPs.replace(/^\s*#.*$/gm, '')), false);
+check('secondary script: coexistence off when none left', secPs.includes('dhcpstaticipcoexistence=disabled'), true);
+
+// ── Internet route (3.1.0) ────────────────────────────────────────────────
+const rlist = [
+  { guid: 'w', alias: 'WiFi', status: 'Up', gateway: '192.168.68.1', metric: 35, routeMetric: 0, autoMetric: true },
+  { guid: 'o', alias: 'OWC', status: 'Up', gateway: '10.20.0.1', metric: 5, routeMetric: 0, autoMetric: true },
+  { guid: 'v', alias: 'Deco', tunnel: true, status: 'Up', gateway: '', metric: 5, routeMetric: 0 },
+  { guid: 'x', alias: 'Ether', status: 'Up', gateway: '10.1.1.1', metric: 1, routeMetric: 0, autoMetric: false },
+];
+check('route: chosen wins, others set aside only if they would tie', ni.planRoute(rlist, 'w'), { chosen: 'w', aside: ['x'] });
+check('route: no gateway, no plan', ni.planRoute(rlist, 'v'), null);
+const RJ = { active: true, method: 'route', preferred: { guid: 'w' } };
+check('route state: on', ni.routeState(RJ, [{ guid: 'w', status: 'Up', metric: 1, autoMetric: false }]).state, 'on');
+check('route state: ended (Windows restarted)', ni.routeState(RJ, [{ guid: 'w', status: 'Up', metric: 35, autoMetric: true }]).state, 'ended');
+check('route state: waiting (card gone)', ni.routeState(RJ, []).state, 'waiting');
+check('route state: 3.0.0 journal still understood', ni.routeState(J, [{ guid: 'o', metric: 9000, autoMetric: false }]).state, 'on');
+
 // ── firewall ──────────────────────────────────────────────────────────────
 check('fw all on', ni.parseFirewall('Domain=True\r\nPrivate=True\r\nPublic=True'),
       { on: 3, total: 3, profiles: { Domain: true, Private: true, Public: true } });
@@ -282,9 +365,10 @@ check('fw no answer', ni.parseFirewall(''), { on: null, total: null, profiles: {
 require('../src/main/store').setLogEnabled(false);
 const calls = [];
 let psActionOk = true;
+let psAnswer = '';
 let readMetricsAnswer = '{"IPv4":{"metric":25,"auto":true},"IPv6":{"metric":25,"auto":true}}';
 require.cache[require.resolve('../src/main/ps')] = { exports: {
-  runPs: async (cmd, env) => { calls.push({ read: cmd, env }); return { ok: true, stdout: readMetricsAnswer, stderr: '' }; },
+  runPs: async (cmd, env) => { calls.push({ read: cmd, env }); return { ok: true, stdout: psAnswer || readMetricsAnswer, stderr: '' }; },
   runPsAction: async (cmd, env) => { calls.push({ cmd, env }); return { ok: psActionOk, message: psActionOk ? '' : 'Access denied' }; },
   runCmd: async (tool, args) => { calls.push({ tool, args }); return { ok: true, stdout: '' }; },
 } };
@@ -392,6 +476,41 @@ const actions = require('../src/main/actions');
   await vpnmod.turnOn({ method: 'disable', preferred: PREF, retreat: RET }, saver);
   check('vpn: disable method disables the set-aside adapter', /\| Disable-NetAdapter -Confirm:\$false$/.test(calls[0].cmd), true);
   check('vpn: disable method reads no priority', calls.some(c => c.read), false);
+
+  // Internet route: every priority read and journaled first, chosen to 1
+  calls.length = 0; saved.length = 0;
+  readMetricsAnswer = '{"IPv4":{"metric":35,"auto":true}}';
+  v = await vpnmod.routeOn({ preferred: PREF, aside: [RET] }, saver);
+  check('route: on ok', v.ok, true);
+  check('route: both priorities read first', calls.slice(0, 2).map(c => c.read !== undefined && c.env.NCC_GUID), [PREF.guid, RET.guid]);
+  check('route: journal BEFORE Windows is touched', saved[0].callsSoFar, 2);
+  check('route: chosen card gets 1, the other 9000', calls.slice(2).map(c => c.env), [{ NCC_GUID: PREF.guid, NCC_METRIC: '1' }, { NCC_GUID: RET.guid, NCC_METRIC: '9000' }]);
+  check('route: active store only', calls.slice(2).every(c => /-PolicyStore ActiveStore/.test(c.cmd) && !/PersistentStore/.test(c.cmd)), true);
+  calls.length = 0; saved.length = 0;
+  await vpnmod.turnOff(v.journal, saver);
+  check('route: automatic puts back every card touched', calls.map(c => c.env.NCC_GUID), [PREF.guid, RET.guid]);
+  check('route: automatic clears the journal', saved[0].j, null);
+
+  // Secondary addresses
+  calls.length = 0;
+  psAnswer = '{"ok":true,"message":"","state":"Preferred","checked":true,"gone":false}';
+  r = await actions.addSecondary(GUID, NASTY, '192.168.50.20', 24);
+  check('secondary: add ok, state read back', [r.ok, r.state, r.checked], [true, 'Preferred', true]);
+  check('secondary: add through env only', calls[0].env, { NCC_OP: 'add', NCC_GUID: GUID, NCC_IP: '192.168.50.20', NCC_MASK: '255.255.255.0' });
+  check('secondary: add carries no card name', calls[0].read.includes('Bob'), false);
+  calls.length = 0;
+  check('secondary: bad address refused', (await actions.addSecondary(GUID, 'x', '192.168.50.300', 24)).ok, false);
+  check('secondary: refused address runs nothing', calls.length, 0);
+  psAnswer = '{"ok":false,"conflict":true,"message":"Another device on this network already uses 192.168.50.20"}';
+  r = await actions.addSecondary(GUID, 'OWC', '192.168.50.20', 24);
+  check('secondary: duplicate reported', [r.ok, r.conflict], [false, true]);
+  calls.length = 0;
+  psAnswer = '{"ok":true,"gone":true}';
+  r = await actions.removeSecondary(GUID, 'OWC', '192.168.50.20');
+  check('secondary: remove through env', calls[0].env, { NCC_OP: 'remove', NCC_GUID: GUID, NCC_IP: '192.168.50.20' });
+  psAnswer = 'garbage';
+  check('secondary: unreadable answer = failure', (await actions.removeSecondary(GUID, 'OWC', '192.168.50.20')).ok, false);
+  psAnswer = '';
 
   calls.length = 0;
   check('vpn: tunnel name checked', (await vpnmod.restartTunnel('Deco; Stop-Computer')).ok, false);

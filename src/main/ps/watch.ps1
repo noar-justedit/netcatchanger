@@ -4,7 +4,8 @@
 # One long-lived PowerShell process that polls every 3 s and prints the line
 # CHANGED only when something actually moved: a connection profile or its
 # internet access, the firewall, an adapter's status, or an adapter's
-# priority (InterfaceMetric: the VPN mode, or Windows putting it back).
+# priority (InterfaceMetric: the VPN mode, or Windows putting it back), or
+# an IPv4 address.
 
 $ErrorActionPreference = 'SilentlyContinue'
 $last  = ''
@@ -22,7 +23,12 @@ while ($true) {
         $m = (Get-NetIPInterface -AddressFamily IPv4 |
               Sort-Object ifIndex |
               ForEach-Object { "$($_.ifIndex)=$($_.InterfaceMetric)" }) -join ';'
-        $cur = "$s|$f|$a|$m"
+        # Addresses: a secondary one added or removed outside the app, a new
+        # DHCP lease, a duplicate found by Windows.
+        $i = (Get-NetIPAddress -AddressFamily IPv4 |
+              Sort-Object ifIndex, IPAddress |
+              ForEach-Object { "$($_.ifIndex)=$($_.IPAddress)/$($_.PrefixLength)/$($_.AddressState)" }) -join ';'
+        $cur = "$s|$f|$a|$m|$i"
         if ($first) { $last = $cur; $first = $false }
         elseif ($cur -ne $last) {
             $last = $cur

@@ -1,5 +1,48 @@
 # Changelog
 
+## [3.1.0] - 2026-10-08
+
+### Added
+
+- **Secondary IP**: a second fixed IPv4 address on another range, next to the
+  DHCP one (or the fixed one), to reach a local network (a NAS, a switch,
+  event equipment) without losing DHCP or the Internet. Never a gateway.
+  - ON / OFF on the adapter card, one switch per address, lined up with the
+    card's other addresses; OFF removes it from Windows and keeps it in the
+    list, ready to go back on. A SECONDARY IP badge, green while one is on.
+  - "Secondary IP" window: add (address + prefix or mask, a name), remove,
+    presets for any card (one click adds and turns on), addresses kept for a
+    card that is no longer there ("Use here" / "Forget").
+  - Checked before it is added: a valid address, not the network or
+    broadcast address of its range, no overlap with the card's main address
+    or another connected card. Windows' duplicate address detection is read
+    back: an address someone else already uses is removed and reported.
+  - On a DHCP card, DHCP / fixed coexistence is turned on before adding and
+    off when the last address goes (Windows 10 2004 or later; older versions
+    are told so).
+  - If the card loses the Internet within 15 s of an address going on, the
+    address goes back off by itself.
+  - A red badge when a new DHCP lease lands in the same range, or Windows
+    finds a duplicate.
+- **Use for Internet**: when several cards reach the Internet (Wi-Fi and
+  Ethernet), one click sends Internet traffic (and the VPN) through the
+  chosen card; the others keep their local network. An INTERNET ROUTE badge
+  shows which card carries it (blue when chosen, grey when it is Windows'
+  choice). "Automatic" in one click, or by itself when Windows restarts.
+
+### Changed
+
+- The VPN card's "Use another connection" now does the same as "Use for
+  Internet" (one mechanism instead of two).
+
+### Fixed
+
+- A card with two IPv4 addresses could show the second one as its address:
+  the main address is now the DHCP one (on a fixed card, the one in the
+  gateway's range).
+- Changing IP settings (DHCP / fixed) erased the card's secondary addresses
+  without a word; they are now put back, also by the 15 s undo.
+
 ## [3.0.0] - 2026-10-06
 
 A complete rewrite: Electron instead of Python / tkinter, on the shared UI

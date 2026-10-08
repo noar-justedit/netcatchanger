@@ -20,12 +20,15 @@
 
 const { app, BrowserWindow, ipcMain, shell, screen, net } = require('electron');
 const path = require('path');
+const os = require('os');
 const { fileURLToPath } = require('url');
 const store = require('./store');
 const netdata = require('./netdata');
 const actions = require('./actions');
 const { semverGt, ipSnapshot, validIp, validMask, predictVpnExit, parseWgDump, tunnelHealth,
-        sendsEverything, vpnState } = require('./netinfo');
+        sendsEverything, vpnState, parsePrefix, checkSecondary, secondaryView,
+        coexistenceSupported, planRoute, routeState } = require('./netinfo');
+const { runPs } = require('./ps');
 const vpn = require('./vpn');
 
 const DEV = process.argv.includes('--dev');
@@ -147,7 +150,7 @@ app.on('before-quit', async e => {
   e.preventDefault();
   quitting = true;
   for (const [guid, p] of pendingIp) {
-    await actions.restoreIp(p.alias, p.snap);
+    await restoreIpAll(guid, p.alias, p.snap);
     store.logEvent('ipconfig', `${p.alias} : reverted (app closed before confirming)`);
     pendingIp.delete(guid);
   }
@@ -186,9 +189,10 @@ ipcMain.handle('net-read', async () => {
   let endedByWindows = false;
   let state = 'off';
   if (data.ok) {
-    state = vpnState(cfg.vpn, data.interfaces).state;
+    state = routeState(cfg.vpn, data.interfaces).state;
     if (state === 'ended') {
-      store.logEvent('vpn', `ended by Windows (${cfg.vpn.method}), ${cfg.vpn.retreat.alias} already back`);
+      store.logEvent(cfg.vpn.method === 'route' ? 'route' : 'vpn',
+        `ended by Windows (${cfg.vpn.method}), ${cfg.vpn.preferred.alias} automatic again`);
       cfg.vpn = null;
       store.saveConfig(cfg);
       endedByWindows = true;
@@ -197,6 +201,12 @@ ipcMain.handle('net-read', async () => {
   } else if (cfg.vpn && cfg.vpn.active) {
     state = 'on';
   }
+  if (data.ok) {
+    for (const a of data.interfaces) a.secondary = secondaryView(a, cfg.secondary);
+  }
+  const guids = new Set(data.ok ? data.interfaces.map(a => a.guid) : []);
+  data.orphans = data.ok ? savedSecondaries().filter(s => !guids.has(s.guid)) : [];
+  data.coexistence = coexistenceSupported(os.release());
   data.vpn = {
     state, endedByWindows,
     journal: cfg.vpn || null,
@@ -239,17 +249,27 @@ const saveJournal = j => { cfg.vpn = j; return store.saveConfig(cfg); };
 // is the one WireGuard uses now; the method is always the priority one
 // (Noar, 10.2026: simple for non-specialists; it keeps the other connection's
 // local network, and a restart of Windows undoes it).
-ipcMain.handle('vpn-on', async (_e, preferredGuid) => {
-  if (cfg.vpn && cfg.vpn.active) return { ok: true };
+// "Use for Internet" on a card, and the VPN card's "Use another connection"
+// (Noar, 10.2026: one mechanism for both). Temporary: a restart of Windows
+// puts the automatic priorities back.
+async function useForInternet(preferredGuid) {
   const pref = adapterOf(preferredGuid);
   if (!pref || pref.tunnel) return { ok: false, message: 'Choose a connection' };
-  const exit = predictVpnExit([...known.values()]);
-  const ret = exit ? adapterOf(exit.guid) : null;
-  if (!ret || ret.guid === pref.guid) return { ok: false, message: `The VPN already goes through ${pref.alias}` };
-  cfg.vpn_prefs = { method: 'metric', preferred: { guid: pref.guid, alias: pref.alias } };
-  return vpn.turnOn({ method: 'metric', preferred: { guid: pref.guid, alias: pref.alias },
-                      retreat: { guid: ret.guid, alias: ret.alias } }, saveJournal);
-});
+  if (cfg.vpn && cfg.vpn.active) {
+    if (cfg.vpn.method === 'route' && cfg.vpn.preferred.guid === pref.guid) return { ok: true };
+    const off = await vpn.turnOff(cfg.vpn, saveJournal);    // one choice at a time
+    if (!off.ok) return off;
+    await netdata.readAll().then(d => { if (d.ok) known = new Map(d.interfaces.filter(a => a.guid).map(a => [a.guid, a])); });
+  }
+  const plan = planRoute([...known.values()], pref.guid);
+  if (!plan) return { ok: false, message: `${pref.alias} has no way to the Internet (no gateway)` };
+  const ref = g => { const a = known.get(g); return { guid: a.guid, alias: a.alias }; };
+  cfg.vpn_prefs = { method: 'route', preferred: ref(plan.chosen) };
+  return vpn.routeOn({ preferred: ref(plan.chosen), aside: plan.aside.map(ref) }, saveJournal);
+}
+ipcMain.handle('vpn-on', (_e, preferredGuid) => useForInternet(preferredGuid));
+ipcMain.handle('route-set', (_e, guid) => useForInternet(guid));
+ipcMain.handle('route-auto', () => vpn.turnOff(cfg.vpn, saveJournal));
 ipcMain.handle('vpn-off', () => vpn.turnOff(cfg.vpn, saveJournal));
 ipcMain.handle('vpn-restart-tunnel', (_e, name) =>
   tunnelsSeen.includes(name) ? vpn.restartTunnel(name) : { ok: false, message: 'This tunnel is not running' });
@@ -277,9 +297,13 @@ ipcMain.handle('ip-apply', async (_e, guid, c) => {
   }
   if (r.ok) {
     pendingIp.set(guid, { alias: a.alias, snap });
+    // DHCP <-> fixed replaces every address of the card: the secondary
+    // ones go back on (3.0.0 lost them without a word).
+    const lost = await putBackSecondaries(guid, a.alias, snap.secondaries);
+    if (lost.length) r.message = 'Could not put back ' + lost.join(', ');
   } else {
     // Half-applied is the worst state: put the previous settings back now.
-    await actions.restoreIp(a.alias, snap);
+    await restoreIpAll(guid, a.alias, snap);
   }
   return r;
 });
@@ -294,9 +318,161 @@ ipcMain.handle('ip-revert', async (_e, guid, why) => {
   const p = pendingIp.get(guid);
   if (!p) return { ok: false, message: 'Nothing to put back' };
   pendingIp.delete(guid);
-  const r = await actions.restoreIp(p.alias, p.snap);
+  const r = await restoreIpAll(guid, p.alias, p.snap);
   store.logEvent('ipconfig', `${p.alias} : reverted (${why === 'timeout' ? 'not confirmed' : 'by user'})`);
   return r;
+});
+
+// The previous settings, then the secondary addresses that went with them.
+async function restoreIpAll(guid, alias, snap) {
+  const r = await actions.restoreIp(alias, snap);
+  await putBackSecondaries(guid, alias, snap && snap.secondaries);
+  return r;
+}
+async function putBackSecondaries(guid, alias, list) {
+  const lost = [];
+  for (const x of list || []) {
+    const r = await actions.addSecondary(guid, alias, x.ip, x.prefix);
+    if (!r.ok) lost.push(x.ip);
+  }
+  return lost;
+}
+
+// ── Secondary addresses (3.1.0) ───────────────────────────────────────────
+// config.json keeps, per card (GUID), the addresses NetCatChanger knows, on
+// or off: Windows has no "off" address, an address is there or not, so OFF
+// = removed from Windows and kept here, ready to go back on.
+
+function cleanName(n) {
+  const t = String(n == null ? '' : n).trim();
+  return t.length <= 60 && !/[\u0000-\u001f\u007f]/.test(t) ? t : null;
+}
+function savedSecondaries() {
+  return (Array.isArray(cfg.secondary) ? cfg.secondary : []).filter(x =>
+    x && typeof x.guid === 'string' && GUID_RE.test(x.guid) && validIp(x.ip) &&
+    Number.isInteger(x.prefix) && x.prefix >= 1 && x.prefix <= 32);
+}
+function keepSecondary(a, ip, prefix, name) {
+  const list = savedSecondaries().filter(x => !(x.guid === a.guid && x.ip === ip));
+  const old = savedSecondaries().find(x => x.guid === a.guid && x.ip === ip);
+  list.push({ guid: a.guid, alias: a.alias, ip, prefix,
+              name: name != null ? name : (old ? old.name : '') });
+  cfg.secondary = list.slice(-100);
+  store.saveConfig(cfg);
+}
+function forgetSecondary(guid, ip) {
+  cfg.secondary = savedSecondaries().filter(x => !(x.guid === guid && x.ip === ip));
+  store.saveConfig(cfg);
+}
+
+// After an address goes on, a card that had the Internet must keep it: if
+// Windows loses the Internet on it within 15 s (twice in a row, NCSI being
+// slow), the address goes back off by itself (Noar, 10.2026). Windows may
+// then pick the secondary address as the source of Internet traffic.
+const watching = new Map();       // guid|ip -> true
+const CONNECTIVITY = "$ErrorActionPreference='SilentlyContinue'; " +
+  "$a = @(Get-NetAdapter | Where-Object { \"$($_.InterfaceGuid)\" -eq $env:NCC_GUID }); " +
+  "if ($a.Count -ne 1) { exit 1 }; " +
+  "$p = @(Get-NetConnectionProfile -InterfaceIndex $a[0].ifIndex); " +
+  "if ($p.Count -eq 0) { 'none' } elseif ($p | Where-Object { \"$($_.IPv4Connectivity)\" -eq 'Internet' -or " +
+  "\"$($_.IPv6Connectivity)\" -eq 'Internet' }) { 'Internet' } else { 'lost' }";
+function watchInternet(a, ip) {
+  const key = a.guid + '|' + ip;
+  if (watching.has(key)) return;
+  watching.set(key, true);
+  let misses = 0, n = 0;
+  const step = async () => {
+    if (!watching.has(key)) return;
+    const r = await runPs(CONNECTIVITY, { NCC_GUID: a.guid }, 10000);
+    const out = String(r.stdout || '').trim();
+    // 'none' (Windows re-identifying the network) proves nothing either way.
+    if (out === 'Internet') misses = 0;
+    else if (out === 'lost') misses++;
+    if (misses >= 2) {
+      watching.delete(key);
+      await actions.removeSecondary(a.guid, a.alias, ip, 'Internet lost on the card');
+      if (win) win.webContents.send('secondary-auto-off', { alias: a.alias, ip });
+      return;
+    }
+    if (++n >= 5) { watching.delete(key); return; }
+    setTimeout(step, 3000);
+  };
+  setTimeout(step, 3000);
+}
+
+async function secondaryOn(a, ip, prefix, name) {
+  if (a.tunnel) return { ok: false, message: 'Not on a VPN tunnel' };
+  if (a.status === 'Disabled') return { ok: false, message: 'This card is turned off: turn it on first' };
+  if (a.dhcp && !coexistenceSupported(os.release())) {
+    return { ok: false, message: 'This version of Windows cannot keep a fixed address next to DHCP (Windows 10 2004 or later needed)' };
+  }
+  const bad = checkSecondary(ip, prefix, a, [...known.values()]);
+  if (bad) return { ok: false, message: bad };
+  keepSecondary(a, ip, prefix, name);             // written first: OFF if anything fails
+  const r = await actions.addSecondary(a.guid, a.alias, ip, prefix);
+  if (r.ok) {
+    if (a.internet) { watchInternet(a, ip); r.watching = true; }
+    if (!r.checked) r.unchecked = a.status !== 'Up';
+  }
+  return r;
+}
+
+ipcMain.handle('sec-add', async (_e, guid, c) => {
+  const a = adapterOf(guid);
+  if (!a) return NOT_FOUND;
+  const ip = String((c && c.ip) || '').trim();
+  const prefix = parsePrefix(c && c.prefix);
+  const name = cleanName(c && c.name);
+  if (name === null) return { ok: false, message: 'Name too long' };
+  return secondaryOn(a, ip, prefix, name);
+});
+ipcMain.handle('sec-set', async (_e, guid, ip, on) => {
+  const a = adapterOf(guid);
+  if (!a) { store.logEvent('secondary', `${ip} -> ${on ? 'on' : 'off'} : card not found`); return NOT_FOUND; }
+  const v = secondaryView(a, cfg.secondary).find(x => x.ip === ip);
+  if (!v) {
+    store.logEvent('secondary', `${a.alias} ${ip} -> ${on ? 'on' : 'off'} : not in the list`);
+    return { ok: false, message: 'This address is no longer listed. Refresh and try again.' };
+  }
+  if (on === true) return v.on ? { ok: true } : secondaryOn(a, v.ip, v.prefix, null);
+  watching.delete(a.guid + '|' + ip);
+  if (!v.saved) keepSecondary(a, v.ip, v.prefix, '');      // added outside the app: kept, so it can go back on
+  return actions.removeSecondary(a.guid, a.alias, v.ip);
+});
+ipcMain.handle('sec-forget', async (_e, guid, ip) => {
+  if (typeof guid !== 'string' || !validIp(ip)) return { ok: false };
+  const a = adapterOf(guid);
+  watching.delete(guid + '|' + ip);
+  if (a && (a.secondaries || []).some(x => x.ip === ip)) {
+    const r = await actions.removeSecondary(a.guid, a.alias, ip, 'removed from the list');
+    if (!r.ok) return r;
+  }
+  forgetSecondary(guid, ip);
+  return { ok: true };
+});
+
+// Secondary presets: a name, an address and a prefix, for any card.
+function cleanSecPreset(p) {
+  if (!p) return null;
+  const name = cleanName(p.name);
+  const prefix = parsePrefix(p.prefix);
+  const ip = String(p.ip || '').trim();
+  if (!name || !validIp(ip) || prefix < 1) return null;
+  return { name, ip, prefix };
+}
+ipcMain.handle('secpre-get', () => (cfg.secondary_presets || []).map(cleanSecPreset).filter(Boolean));
+ipcMain.handle('secpre-save', (_e, p) => {
+  const c = cleanSecPreset(p);
+  if (!c) return { ok: false, message: 'Invalid preset' };
+  const list = (cfg.secondary_presets || []).map(cleanSecPreset).filter(x => x && x.name !== c.name);
+  if (list.length >= 50) return { ok: false, message: 'Too many presets (50 at most)' };
+  list.push(c);
+  cfg.secondary_presets = list;
+  return { ok: store.saveConfig(cfg), presets: list };
+});
+ipcMain.handle('secpre-delete', (_e, name) => {
+  cfg.secondary_presets = (cfg.secondary_presets || []).map(cleanSecPreset).filter(x => x && x.name !== name);
+  return { ok: store.saveConfig(cfg), presets: cfg.secondary_presets };
 });
 
 // ── Presets (same format as 2.x: { name, mode, ip, mask, gw, dns:[..] }) ──

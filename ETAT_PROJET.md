@@ -1,13 +1,23 @@
 # NetCatChanger : état du projet
 
-Mis à jour le 07.10.2026.
+Mis à jour le 08.10.2026.
 
 ## En une phrase
 
 Gestionnaire de profils réseau Windows (Privé / Public / Domaine), de
-configuration IP, du pare-feu et de la sortie VPN WireGuard. **Version 3.0.0**
-(réécriture Electron de la 2.2.1 Python / tkinter), **validée par Noar sur
-SERVAL le 07.10.2026**, publication sur GitHub en cours.
+configuration IP, du pare-feu et de la sortie VPN WireGuard. **Version 3.1.0**
+en cours : IP secondaire et « Use for Internet », code écrit et vérifié hors
+Windows (tests, rendus), **pas encore testée sur SERVAL**. La 3.0.0
+(réécriture Electron de la 2.2.1) a été validée sur SERVAL le 07.10.2026.
+
+## Où en est la 3.1
+
+| Étape | Contenu | État |
+|---|---|---|
+| 1 | IP secondaire : lecture de toutes les adresses, ON / OFF par adresse, fenêtre « Secondary IP », préréglages, contrôles | premier essai réussi sur SERVAL (ajout d'une adresse), reste de la liste à tester |
+| 2 | Correction 3.0.0 : adresse principale mal choisie, IP settings effaçait les adresses secondaires | écrit, à tester sur SERVAL |
+| 3 | « Use for Internet » (priorité de route), fusionné avec la sortie VPN | écrit, à tester sur SERVAL |
+| 4 | Interface validée par Noar | validée ; retouches après le premier essai sur SERVAL (alignement, badge SECONDARY IP) |
 
 ## Où en est la 3.0
 
@@ -28,19 +38,21 @@ src/main/main.js        fenêtre, sécurité (CSP, navigation bloquée), liste I
 src/main/preload.js     la seule porte entre la fenêtre et la machine
 src/main/ps.js          lance PowerShell / netsh / ipconfig / ping (chemins System32,
                         listes d'arguments, valeurs par variables d'environnement)
-src/main/ps/*.ps1       interfaces (lecture), watch (surveillance), wireguard (tunnels)
+src/main/ps/*.ps1       interfaces (lecture), watch (surveillance), wireguard (tunnels),
+                        secondary (ajout / retrait d'une adresse secondaire)
 src/main/netdata.js     lecture de l'état réseau + surveillance tant que la fenêtre vit
 src/main/actions.js     ce qui modifie la machine (profil, carte, IP, DNS, pare-feu)
-src/main/vpn.js         sortie VPN : priorité / désactivation, tunnels WireGuard
+src/main/vpn.js         priorités : « Use for Internet » (routeOn), ancien mode VPN 3.0.0,
+                        tunnels WireGuard
 src/main/netinfo.js     fonctions pures (parseurs, logique VPN), couvertes par les tests
 src/main/store.js       config.json et session.log dans %APPDATA%\NetCatChanger
 src/renderer/           index.html, style.css (charte), app.js
-test/run-tests.js       npm test (186 vérifications)
+test/run-tests.js       npm test (250 vérifications)
 scripts/build_windows.cmd    build de l'installeur, à lancer sur Windows
 scripts/fetch-electron.js    télécharge Electron une fois (curl, reprise, SHA-256)
 scripts/push_github.cmd/.ps1 publication sur GitHub, depuis Windows (décision de Noar)
 docs/screenshots/       captures du README (rendues avec des données simulées)
-docs/RELEASE-3.0.0.md   texte de la Release GitHub 3.0.0
+docs/RELEASE-3.x.y.md   texte des Releases GitHub
 build-resources/installer.nsh  migration depuis la 2.x (Inno Setup)
 ```
 
@@ -122,8 +134,76 @@ Le code testé est donc exactement le code livré.
     réglage prévient que la case « Block untunneled traffic » bloque alors le
     réseau local de la carte mise de côté.
 
+- **IP secondaire** (3.1.0, spec de Noar) :
+  - Windows n'a pas d'adresse « désactivée » : OFF retire l'adresse de
+    Windows et la garde dans `config.json` (clé `secondary`, par GUID de
+    carte), prête à revenir. Une adresse ajoutée hors de l'appli apparaît en
+    ON ; si on la passe en OFF, elle est gardée. « Remove » l'oublie.
+  - Jamais de passerelle (une deuxième route par défaut casserait Internet
+    et le VPN). Aucun champ, aucun argument `gateway` (vérifié par un test).
+  - `ps/secondary.ps1` : carte retrouvée par GUID, netsh appelé avec son
+    numéro d'interface ; sur une carte en DHCP, `dhcpstaticipcoexistence`
+    activé avant l'ajout et désactivé quand il ne reste plus d'adresse
+    manuelle ; sur une carte fixe, simple ajout. Windows 10 2004 (build
+    19041) minimum pour le DHCP, sinon message clair.
+  - Doublon : impossible à tester par ping avant l'ajout (pas de route vers
+    la plage). L'appli ajoute, lit l'état que donne la détection de doublon
+    de Windows (Tentative, Preferred, Duplicate) pendant 6 s au plus, et
+    retire l'adresse si elle est en double. Carte non connectée : pas de
+    vérification possible, l'appli le dit.
+  - Contrôles avant ajout (`checkSecondary`) : adresse valide, ni réseau ni
+    broadcast (sauf /31 /32), pas 0.x, 127.x, 169.254, multicast ; pas la
+    même plage que l'adresse principale de la carte ni qu'une autre carte
+    connectée ; pas déjà utilisée.
+  - Retour automatique (Noar) : si la carte avait Internet et le perd deux
+    lectures de suite dans les 15 s qui suivent un ON, l'adresse repasse en
+    OFF. Limite : le verdict Internet de Windows est lent et une coupure sans
+    rapport peut aussi déclencher le retour. Le contrôle s'arrête si l'appli
+    est fermée pendant ces 15 s.
+  - Préréglages (`secondary_presets`) : nom + adresse + préfixe, sans carte
+    (recommandation acceptée par défaut, Noar n'a pas tranché ce point).
+  - Adresses d'une carte disparue : listées dans la fenêtre (« Use here » /
+    « Forget »).
+  - Badge rouge si un nouveau bail DHCP tombe dans la même plage, ou si
+    Windows signale un doublon.
+  - Sur la carte (Noar, retour sur SERVAL 08.10.2026) : chaque adresse
+    secondaire est une ligne de la grille des adresses (nom dans la colonne
+    des libellés, adresse alignée à droite avec IPv4 / IPv6 / Gateway,
+    interrupteur à droite de l'adresse). La grille des adresses a trois
+    colonnes : libellé, adresse alignée à droite, interrupteurs. Celui de la
+    carte est sur la ligne IPv4, ceux des adresses secondaires (même taille)
+    sur leur ligne : toutes les adresses finissent au même bord, tous les
+    interrupteurs sont dans la même colonne. Badge SECONDARY IP : vert si une adresse est active, gris si
+    toutes sont en OFF, rouge en cas de problème.
+  - Fenêtre à part (« Secondary IP ») plutôt qu'une section d'IP settings :
+    ses actions s'appliquent tout de suite, IP settings attend « Apply ».
+- **Corrections 3.0.0** (Noar) : l'adresse principale est choisie par
+  `pickPrimary` (l'adresse DHCP ; sur une carte fixe, celle de la plage de la
+  passerelle), plus « la première listée » ; IP settings remet les adresses
+  secondaires après un passage DHCP / fixe, et l'annulation 15 s aussi.
+- **Use for Internet** (Noar, 10.2026 : temporaire, fusion avec le VPN) :
+  - Bouton sur chaque carte connectée avec passerelle, quand il y en a au
+    moins deux. La carte choisie reçoit la priorité 1 ; une autre carte qui
+    ferait encore jeu égal ou mieux est mise à 9000. Magasin actif
+    seulement : un redémarrage de Windows remet l'automatique.
+  - Badge INTERNET ROUTE : bleu sur la carte choisie, gris sur celle que
+    Windows choisit seul. « Automatic » remet tout.
+  - Le bouton « Use another connection » de la carte VPN fait la même chose.
+    Journal dans `config.json` (clé `vpn`, `method: "route"`, avec la
+    priorité d'origine de chaque carte touchée) écrit avant le changement.
+    Un journal 3.0.0 (`method: "metric"`) reste compris et peut être défait.
+  - Limite : si la carte choisie reste connectée mais qu'Internet ne passe
+    plus derrière (box en panne), Windows ne bascule pas.
+- **Nom** : Noar a envisagé « net manager », puis décidé de garder
+  NetCatChanger (08.10.2026).
+
 ## Questions ouvertes (à poser à Noar)
 
+0. À tester sur SERVAL avec ses vraies plages : avec une adresse
+   secondaire, Windows prend-il bien l'adresse DHCP comme source vers
+   Internet ? (Sinon, le retour automatique la repasse en OFF ; l'option
+   netsh `skipassource` serait la piste, avec le risque de ne plus joindre
+   la plage secondaire.)
 1. La case « Block untunneled traffic » de son tunnel WireGuard est-elle
    cochée ?
 2. Résultat sur SERVAL (Ethernet et Wi-Fi branchés) de
@@ -147,7 +227,33 @@ Le code testé est donc exactement le code livré.
 - Avis de mise à jour : n'apparaîtra qu'une fois une version plus récente
   publiée sur GitHub.
 
+## À vérifier sur SERVAL pour la 3.1.0
+
+- IP secondaire sur l'OWC en DHCP : ajout, ON / OFF, Remove ; `netsh
+  interface ipv4 show interface <n>` montre la coexistence activée puis
+  désactivée au retrait de la dernière ; l'adresse survit à un redémarrage.
+- Doublon : prendre l'adresse d'un appareil présent, l'appli doit refuser.
+- Carte en IP fixe : ajout d'une adresse supplémentaire.
+- IP settings sur une carte qui a une adresse secondaire : passage DHCP ->
+  fixe -> DHCP, puis laisser filer les 15 s ; l'adresse secondaire doit
+  rester.
+- Use for Internet : Wi-Fi et Ethernet branchés, basculer, vérifier
+  `Get-NetRoute -DestinationPrefix 0.0.0.0/0` et un site ; « Automatic » ;
+  redémarrage (l'appli doit annoncer le retour à l'automatique) ; avec le
+  VPN, « Use another connection ».
+
 ## Problèmes connus
+
+- 3.1.0 sur SERVAL (08.10.2026), corrigé : l'interrupteur OFF d'une
+  adresse secondaire écrivait « ok » dans le journal sans rien retirer.
+  Cause : dans Windows PowerShell 5.1, un objet Windows (CIM) seul n'a pas
+  de `.Count` ; `(& $find).Count` valait donc rien, l'adresse semblait déjà
+  partie et netsh n'était jamais appelé. Même cause : la détection de
+  doublon ne lisait jamais l'état de l'adresse. Corrigé par `@(& $find)`,
+  reproduit puis vérifié avec un faux Windows sous PowerShell 7, protégé
+  par un test. Ajouts au passage : si netsh échoue, `Remove-NetIPAddress` ;
+  message de Windows dans l'erreur ; chaque demande ON / OFF écrite dans
+  `session.log`. À revérifier sur SERVAL.
 
 - Builds sur SERVAL (06.10.2026) : le téléchargement d'Electron par
   electron-builder abandonnait au bout de 10 minutes, et l'installeur

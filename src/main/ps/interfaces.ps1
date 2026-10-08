@@ -85,6 +85,7 @@ foreach ($ad in $adapters) {
         InterfaceMetric = -1
         AutomaticMetric = $true
         RouteMetric     = -1
+        IPv4List        = @()
     }
     if ($profiles.ContainsKey($a)) {
         $p = $profiles[$a]
@@ -102,6 +103,12 @@ foreach ($ad in $adapters) {
                $_.PrefixOrigin -ne 'WellKnown' } |
                Select-Object -First 1 -ExpandProperty IPAddress
         if ($v4e) { $obj.IPv4Address = "$($v4e.IPAddress)"; $obj.PrefixLength = [int]$v4e.PrefixLength }
+        # Every IPv4 address with its origin (Dhcp / Manual / WellKnown) and
+        # state (Preferred / Tentative / Duplicate): the secondary addresses,
+        # and the main one chosen by netinfo.js, not by whichever comes first.
+        $obj.IPv4List = @($allIPs[$a] | Where-Object { $_.AddressFamily -eq 'IPv4' } | ForEach-Object {
+            [ordered]@{ IPAddress = "$($_.IPAddress)"; PrefixLength = [int]$_.PrefixLength
+                        PrefixOrigin = "$($_.PrefixOrigin)"; AddressState = "$($_.AddressState)" } })
         if ($v6)  { $obj.IPv6Address = "$v6" }
     }
     if ($gateways.ContainsKey($a)) { $obj.Gateway = "$($gateways[$a])" }
@@ -114,4 +121,4 @@ foreach ($ad in $adapters) {
 
 # -InputObject, not the pipeline: piped, a one-adapter list would lose its
 # brackets and arrive as a bare object (Node accepts both anyway).
-ConvertTo-Json -InputObject ([ordered]@{ adapters = $result; netsh = $netsh }) -Compress -Depth 4
+ConvertTo-Json -InputObject ([ordered]@{ adapters = $result; netsh = $netsh }) -Compress -Depth 5

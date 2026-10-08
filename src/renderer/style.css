@@ -134,8 +134,8 @@ button{font-family:inherit;}
 .fw .ctl,.vpn .ctl{display:flex;align-items:center;gap:10px;}
 
 /* ── Adapter card ─────────────────────────────────────────────────────── */
-.ad{display:grid;grid-template-columns:40px minmax(0,1fr) auto auto;column-gap:14px;}
-.ad > .switch{align-self:start;margin-top:2px;margin-left:4px;}
+.ad{display:grid;grid-template-columns:40px minmax(0,1fr) auto;column-gap:14px;}
+/* The card's switch lives in the address grid's last column (see app.js ipRow). */
 .ad .body{min-width:0;display:flex;flex-direction:column;gap:7px;}
 .ad .head{display:flex;align-items:baseline;gap:10px;min-width:0;}
 .ad .head .obj-name{white-space:nowrap;}
@@ -148,7 +148,10 @@ button{font-family:inherit;}
 .acts{display:flex;gap:5px;flex-wrap:wrap;margin-top:1px;}
 
 .ad .side{display:flex;flex-direction:column;align-items:flex-end;gap:10px;min-width:220px;}
-.ips{display:grid;grid-template-columns:auto auto;column-gap:10px;row-gap:5px;align-items:center;}
+.ips{display:grid;grid-template-columns:auto auto 34px;column-gap:10px;row-gap:5px;align-items:center;}
+.ips .sw-cell{display:flex;align-items:center;justify-content:flex-end;}
+/* Public / Private stay under the addresses, not under the switches. */
+.ad .side > :not(.ips){margin-right:44px;}
 .ips .lbl{justify-content:flex-end;}
 .ips .v{font-family:var(--mono);font-size:14px;color:var(--text2);text-align:right;}
 .ips .v.none{color:var(--text4);}
@@ -268,3 +271,33 @@ select.field option{background:var(--raise);color:var(--text);}
 .ad .obj-name{cursor:context-menu;border-radius:4px;}
 .ad .obj-name:focus-visible{outline:none;box-shadow:var(--focus);}
 .renew-row{display:flex;align-items:center;gap:12px;background:var(--ins);border-radius:var(--r-ins);padding:10px 12px;}
+
+/* ── Secondary addresses (3.1.0) ─────────────────────────────────────── */
+/* A smaller switch than the card's own: it belongs to one address. */
+.switch.mini{width:26px;height:16px;}
+.switch.mini::before{width:10px;height:10px;}
+.switch.mini.on::before{transform:translateX(10px);}
+.ips .sec-lbl{height:18px;gap:7px;}
+.ips .sec-lbl .sec-name{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ips .sec-lbl.off .sec-name{color:var(--text4);}
+.ips .sec-v .px{color:var(--text4);}
+.ips .sec-v.off{color:var(--text4);}
+
+.sec-list{display:flex;flex-direction:column;gap:6px;}
+.sec-row{display:flex;align-items:center;gap:10px;background:var(--ins);border-radius:var(--r-ins);padding:8px 10px 8px 12px;}
+.sec-row .sec-ip{font-family:var(--mono);font-size:13px;color:var(--text2);}
+.sec-row .sec-name{flex:1;min-width:0;font-size:12px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.sec-row.off .sec-ip{color:var(--text4);}
+.sec-row .btn{background:var(--card);padding:5px 10px;}
+.sec-empty{font-size:12px;color:var(--text4);padding:4px 2px;}
+.sec-add{display:grid;grid-template-columns:1fr 64px 1fr auto;gap:6px;}
+.sec-add .field{font-size:12.5px;padding:7px 10px;}
+.chips{display:flex;flex-wrap:wrap;gap:6px;}
+.chip{display:inline-flex;align-items:center;background:var(--ins);border-radius:9px;overflow:hidden;}
+.chip button{border:none;background:transparent;color:var(--text2);font-size:12px;cursor:pointer;padding:6px 4px 6px 10px;}
+.chip button .mono{font-family:var(--mono);font-size:11.5px;color:var(--text3);margin-left:6px;}
+.chip button.x{padding:6px 9px 6px 5px;color:var(--text4);}
+.chip button:hover{color:var(--text);}
+.chip button:focus-visible{outline:none;box-shadow:var(--focus);}
+.sec-sub{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);}
+.busy-lock .sec-row button,.busy-lock .chip button{pointer-events:none;opacity:.6;}

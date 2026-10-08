@@ -70,6 +70,9 @@ function ipSnapshot(a) {
     mask: a.mask || '',
     gw: a.gateway || '',
     dns: Array.isArray(a.dns) ? a.dns.slice(0, 2) : [],
+    // Changing DHCP <-> fixed replaces every address of the card: the
+    // secondary ones are put back after (3.0.0 lost them).
+    secondaries: (a.secondaries || []).map(x => ({ ip: x.ip, prefix: x.prefix })),
   };
 }
 
@@ -227,7 +230,17 @@ function buildInterfaces(raw) {
     const w = wifi[alias] || null;
     const type = detectIfaceType(alias, a.MediaType, !!w);
     const cat = CATEGORY[Number(a.NetworkCategory)] || null;
-    const v4 = a.IPv4Address && a.IPv4Address !== 'N/A' ? String(a.IPv4Address) : '';
+    // Every IPv4 address (3.1.0); the main one chosen here, not by PowerShell.
+    const addresses = parseIpv4List(a.IPv4List);
+    let primary = null;
+    if (addresses.length) {
+      primary = pickPrimary(addresses, a.DhcpEnabled !== false, a.Gateway);
+    } else if (a.IPv4Address && a.IPv4Address !== 'N/A' && validIp(a.IPv4Address)) {
+      primary = { ip: String(a.IPv4Address), origin: '', state: '',
+                  prefix: Number.isInteger(a.PrefixLength) ? a.PrefixLength : -1 };
+    }
+    const v4 = primary ? primary.ip : '';
+    const pfx = primary ? primary.prefix : -1;
     const v6 = a.IPv6Address && a.IPv6Address !== 'N/A' ? String(a.IPv6Address) : '';
     return {
       alias,
@@ -241,8 +254,11 @@ function buildInterfaces(raw) {
       type,
       tunnel: isTunnel(a.Description),
       ipv4: v4,
-      prefix: Number.isInteger(a.PrefixLength) ? a.PrefixLength : -1,
-      mask: prefixToMask(Number.isInteger(a.PrefixLength) && a.PrefixLength >= 0 ? a.PrefixLength : ''),
+      prefix: pfx,
+      mask: prefixToMask(pfx >= 0 ? pfx : ''),
+      addresses,
+      primary,
+      secondaries: secondariesOf(addresses, primary),
       ipv6: v6,
       gateway: String(a.Gateway || ''),
       dns: String(a.Dns || '').split(',').map(s => s.trim()).filter(Boolean),
@@ -353,7 +369,187 @@ function vpnState(journal, list) {
   return { state: r.metric === RETREAT_METRIC && !r.autoMetric ? 'on' : 'ended' };
 }
 
+// ── Secondary IPv4 addresses ──────────────────────────────────────────────
+// A fixed address added next to the DHCP one (Windows 10 2004+:
+// dhcpstaticipcoexistence) or next to the fixed one. Never with a gateway.
+
+function ipToInt(ip) {
+  return String(ip).split('.').reduce((acc, p) => (acc * 256) + Number(p), 0) >>> 0;
+}
+function intToIp(n) {
+  return [24, 16, 8, 0].map(s => (n >>> s) & 0xFF).join('.');
+}
+function maskInt(prefix) {
+  return prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+}
+function maskToPrefix(mask) {
+  if (!validMask(mask)) return -1;
+  let n = ipToInt(mask), p = 0;
+  while (n & 0x80000000) { p++; n = (n << 1) >>> 0; }
+  return p;
+}
+// "24", "/24" or "255.255.255.0" -> 24; anything else -> -1.
+function parsePrefix(s) {
+  const t = String(s == null ? '' : s).trim().replace(/^\//, '');
+  if (/^\d{1,2}$/.test(t)) {
+    const p = Number(t);
+    return p >= 1 && p <= 32 ? p : -1;
+  }
+  return maskToPrefix(t);
+}
+function rangeOf(ip, prefix) {
+  const m = maskInt(prefix);
+  const net = (ipToInt(ip) & m) >>> 0;
+  return { net, last: (net | (~m >>> 0)) >>> 0 };
+}
+function rangesOverlap(a, b) {
+  return a.net <= b.last && b.net <= a.last;
+}
+function rangeText(ip, prefix) {
+  return `${intToIp(rangeOf(ip, prefix).net)}/${prefix}`;
+}
+
+// interfaces.ps1 prints every IPv4 address of a card with where it comes
+// from (Dhcp, Manual, WellKnown = 169.254) and its state (Preferred,
+// Tentative, Duplicate...). PowerShell may give one object instead of a list.
+function parseIpv4List(list) {
+  if (!list) return [];
+  if (!Array.isArray(list)) list = [list];
+  return list.filter(x => x && validIp(x.IPAddress)).map(x => ({
+    ip: String(x.IPAddress),
+    prefix: Number.isInteger(x.PrefixLength) ? x.PrefixLength : -1,
+    origin: String(x.PrefixOrigin || ''),
+    state: String(x.AddressState || ''),
+  }));
+}
+
+// The card's main address: the DHCP one; on a fixed card, the one whose
+// range holds the gateway, else the first one. 3.0.0 took the first address
+// Windows listed, which could be the secondary one.
+function pickPrimary(addrs, dhcp, gateway) {
+  if (!addrs.length) return null;
+  if (dhcp) {
+    const d = addrs.find(x => x.origin === 'Dhcp');
+    if (d) return d;
+    const w = addrs.find(x => x.origin === 'WellKnown');      // 169.254: no DHCP answer
+    if (w) return w;
+  }
+  if (validIp(gateway)) {
+    const g = addrs.find(x => x.prefix > 0 && x.prefix <= 32 &&
+      rangesOverlap(rangeOf(x.ip, x.prefix), rangeOf(gateway, 32)));
+    if (g) return g;
+  }
+  return addrs.find(x => x.origin !== 'WellKnown') || addrs[0];
+}
+
+// The secondary addresses Windows has now on a card: every fixed address
+// that is not the main one.
+function secondariesOf(addrs, primary) {
+  return addrs.filter(x => x !== primary && x.origin === 'Manual' && x.prefix > 0);
+}
+
+// Checks an address before it is added (or turned back on) on `card`.
+// `all` is every adapter of the last reading. Returns '' or a sentence.
+function checkSecondary(ip, prefix, card, all) {
+  if (!validIp(ip)) return 'Not a valid IPv4 address';
+  if (!(prefix >= 1 && prefix <= 32)) return 'Not a valid mask or prefix';
+  const n = ipToInt(ip), first = n >>> 24;
+  if (first === 0 || first === 127 || first >= 224) return 'This address cannot be used on a network card';
+  if (String(ip).startsWith('169.254.')) return '169.254 addresses are given by Windows itself';
+  const r = rangeOf(ip, prefix);
+  if (prefix <= 30 && n === r.net) return `${ip} is the network address of ${rangeText(ip, prefix)}`;
+  if (prefix <= 30 && n === r.last) return `${ip} is the broadcast address of ${rangeText(ip, prefix)}`;
+  for (const a of all || []) {
+    for (const x of a.addresses || []) {
+      if (x.origin === 'WellKnown' || !(x.prefix > 0)) continue;
+      if (x.ip === ip) {
+        return a.guid === card.guid ? `${ip} is already on this card` : `${ip} is already used by ${a.alias}`;
+      }
+    }
+  }
+  const p = card.primary;
+  if (p && p.origin !== 'WellKnown' && p.prefix > 0 && rangesOverlap(r, rangeOf(p.ip, p.prefix))) {
+    return `Same range as the main address of this card (${rangeText(p.ip, p.prefix)})`;
+  }
+  for (const a of all || []) {
+    if (a.guid === card.guid || a.status !== 'Up') continue;
+    for (const x of a.addresses || []) {
+      if (x.origin === 'WellKnown' || !(x.prefix > 0)) continue;
+      if (rangesOverlap(r, rangeOf(x.ip, x.prefix))) {
+        return `Same range as ${a.alias} (${rangeText(x.ip, x.prefix)})`;
+      }
+    }
+  }
+  return '';
+}
+
+// What the card shows: the addresses NetCatChanger keeps for it (config.json,
+// on or off) merged with the secondary addresses Windows has now (on, even
+// when added outside the app). Each with what is wrong, if anything.
+function secondaryView(card, saved) {
+  const mine = (saved || []).filter(s => s.guid === card.guid);
+  const live = card.secondaries || [];
+  const out = mine.map(s => {
+    const x = live.find(l => l.ip === s.ip);
+    return { ip: s.ip, prefix: x ? x.prefix : s.prefix, name: s.name || '', on: !!x,
+             state: x ? x.state : '', saved: true };
+  });
+  for (const x of live) {
+    if (!out.some(o => o.ip === x.ip)) {
+      out.push({ ip: x.ip, prefix: x.prefix, name: '', on: true, state: x.state, saved: false });
+    }
+  }
+  const p = card.primary;
+  for (const o of out) {
+    o.problem = '';
+    if (o.on && o.state === 'Duplicate') o.problem = 'conflict';
+    else if (o.on && p && p.origin !== 'WellKnown' && p.prefix > 0 &&
+             rangesOverlap(rangeOf(o.ip, o.prefix), rangeOf(p.ip, p.prefix))) o.problem = 'range';
+  }
+  return out;
+}
+
+// Windows 10 2004 (build 19041) and later accept DHCP + fixed addresses on
+// one card. `release` is os.release(): "10.0.22631".
+function coexistenceSupported(release) {
+  const m = String(release || '').match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return false;
+  return Number(m[1]) > 10 || (Number(m[1]) === 10 && Number(m[3]) >= 19041);
+}
+
+// ── Internet route (3.1.0): "Use for Internet" ────────────────────────────
+// Windows (and WireGuard, see predictVpnExit) sends Internet traffic through
+// the default route with the lowest RouteMetric + InterfaceMetric. The chosen
+// card gets InterfaceMetric 1; any other card that would still tie or win is
+// set aside (9000). Active store only: a restart of Windows undoes it.
+const ROUTE_METRIC = 1;
+function routeCandidates(list) {
+  return (list || []).filter(a => !a.tunnel && a.status === 'Up' && a.gateway &&
+                                 a.metric >= 0 && a.routeMetric >= 0);
+}
+function planRoute(list, guid) {
+  const c = routeCandidates(list);
+  const chosen = c.find(a => a.guid === guid);
+  if (!chosen) return null;
+  const total = ROUTE_METRIC + chosen.routeMetric;
+  const aside = c.filter(a => a.guid !== guid && a.metric + a.routeMetric <= total).map(a => a.guid);
+  return { chosen: chosen.guid, aside };
+}
+// Where a 3.1.0 route journal stands (same states as vpnState).
+function routeState(journal, list) {
+  if (!journal || !journal.active) return { state: 'off' };
+  if (journal.method !== 'route') return vpnState(journal, list);   // a 3.0.0 VPN journal
+  const byGuid = g => (list || []).find(a => a.guid === g);
+  const chosen = byGuid(journal.preferred && journal.preferred.guid);
+  if (!chosen) return { state: 'waiting' };
+  if (chosen.metric !== ROUTE_METRIC || chosen.autoMetric) return { state: 'ended' };
+  return { state: chosen.status === 'Up' ? 'on' : 'waiting' };
+}
+
 module.exports = {
+  ROUTE_METRIC, routeCandidates, planRoute, routeState,
+  ipToInt, intToIp, maskToPrefix, parsePrefix, rangeOf, rangesOverlap, rangeText,
+  parseIpv4List, pickPrimary, secondariesOf, checkSecondary, secondaryView, coexistenceSupported,
   predictVpnExit, parseWgDump, tunnelHealth, sendsEverything, vpnState, RETREAT_METRIC,
   semverGt, prefixToMask, validIp, validMask, ipSnapshot, isApipa, psQuote,
   parseNetshWlan, parseWifiStandard, parseWifiBand, parseLinkSpeed,
