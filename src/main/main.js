@@ -22,12 +22,13 @@ const { app, BrowserWindow, ipcMain, shell, screen, net } = require('electron');
 const path = require('path');
 const os = require('os');
 const { fileURLToPath } = require('url');
+const { spawn } = require('child_process');
 const store = require('./store');
 const netdata = require('./netdata');
 const actions = require('./actions');
 const { semverGt, ipSnapshot, validIp, validMask, predictVpnExit, parseWgDump, tunnelHealth,
         sendsEverything, vpnState, parsePrefix, checkSecondary, secondaryView,
-        coexistenceSupported, planRoute, routeState } = require('./netinfo');
+        coexistenceSupported, planRoute, routeState, WATCH, internetWatchVerdict } = require('./netinfo');
 const { runPs } = require('./ps');
 const vpn = require('./vpn');
 
@@ -35,6 +36,15 @@ const DEV = process.argv.includes('--dev');
 const GITHUB_URL = 'https://github.com/noar-justedit/netcatchanger';
 const UPDATE_URL = 'https://raw.githubusercontent.com/noar-justedit/netcatchanger/main/version.json';
 const PAGE_BG = '#0a0b0e';
+
+// The app runs as administrator: a debugger port or an inspector would hand
+// that to anyone who can edit the shortcut it is started from. Refused.
+// (The build also turns these off in Electron itself: electronFuses.)
+if (process.argv.some(a => /^--(inspect|remote-debugging|js-flags)/i.test(a)) ||
+    ['inspect', 'inspect-brk', 'remote-debugging-port', 'remote-debugging-pipe']
+      .some(s => app.commandLine.hasSwitch(s))) {
+  app.exit(1);
+}
 
 // One window, one instance: a second launch brings the first one forward.
 if (!app.requestSingleInstanceLock()) {
@@ -54,8 +64,18 @@ store.setLogEnabled(cfg.log_enabled !== false);
 
 // Only these addresses ever leave the app for the browser: the window runs
 // with administrator rights and must not become a way to open anything else.
+// Only GitHub pages of the project, plain characters only. On Windows the
+// link goes through explorer.exe, which hands it to the user's own
+// (not elevated) desktop: the browser does not run as administrator, and a
+// handler planted in the user's registry cannot either.
+const SAFE_URL = /^[A-Za-z0-9:/._~-]+$/;
 function openExternalSafely(url) {
-  if (typeof url === 'string' && (url === GITHUB_URL || url.startsWith(GITHUB_URL + '/'))) {
+  if (typeof url !== 'string' || !SAFE_URL.test(url)) return;
+  if (url !== GITHUB_URL && !url.startsWith(GITHUB_URL + '/')) return;
+  if (process.platform === 'win32') {
+    const explorer = path.join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe');
+    spawn(explorer, [url], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+  } else {
     shell.openExternal(url);
   }
 }
@@ -146,9 +166,12 @@ app.on('window-all-closed', () => { netdata.stopWatcher(); app.quit(); });
 let quitting = false;
 app.on('before-quit', async e => {
   netdata.stopWatcher();
-  if (quitting || !pendingIp.size) return;
+  if (quitting || (!pendingIp.size && !ipOps.size)) return;
   e.preventDefault();
   quitting = true;
+  // An Apply or a Revert still running finishes first (closing the window
+  // in the middle used to skip the put-back).
+  await Promise.allSettled([...ipOps]);
   for (const [guid, p] of pendingIp) {
     await restoreIpAll(guid, p.alias, p.snap);
     store.logEvent('ipconfig', `${p.alias} : reverted (app closed before confirming)`);
@@ -175,7 +198,7 @@ ipcMain.handle('app-info', () => ({
 let known = new Map();          // guid -> adapter
 let tunnelsSeen = [];          // names of the WireGuard tunnels last seen running
 ipcMain.handle('net-read', async () => {
-  const [data, wg] = await Promise.all([netdata.readAll(), vpn.wireguard()]);
+  const [data, wg] = await Promise.all([netdata.readAll(readOpts()), vpn.wireguard()]);
   if (data.ok) known = new Map(data.interfaces.filter(a => a.guid).map(a => [a.guid, a]));
   const now = Date.now() / 1000;
   const tunnels = wg.tunnels.map(t => {
@@ -190,11 +213,22 @@ ipcMain.handle('net-read', async () => {
   let state = 'off';
   if (data.ok) {
     state = routeState(cfg.vpn, data.interfaces).state;
-    if (state === 'ended') {
+    if (state === 'ended' && routeBusy) {
+      // A reading taken while "Use for Internet" / "Automatic" is changing
+      // the priorities sees a half-done state: it decides nothing.
+      state = 'on';
+    } else if (state === 'ended') {
+      // Windows put the chosen card back (restart, card turned off and on):
+      // the cards set aside are put back too, then the journal goes.
       store.logEvent(cfg.vpn.method === 'route' ? 'route' : 'vpn',
         `ended by Windows (${cfg.vpn.method}), ${cfg.vpn.preferred.alias} automatic again`);
-      cfg.vpn = null;
-      store.saveConfig(cfg);
+      const j = cfg.vpn;
+      await routeLocked(async () => {
+        if (cfg.vpn !== j) return;          // changed meanwhile by the user
+        await vpn.turnOff(j, saveJournal);
+        cfg.vpn = null;
+        store.saveConfig(cfg);
+      });
       endedByWindows = true;
       state = 'off';
     }
@@ -252,6 +286,15 @@ const saveJournal = j => { cfg.vpn = j; return store.saveConfig(cfg); };
 // "Use for Internet" on a card, and the VPN card's "Use another connection"
 // (Noar, 10.2026: one mechanism for both). Temporary: a restart of Windows
 // puts the automatic priorities back.
+// One priority change at a time, and readings know when one is running.
+let routeBusy = 0;
+let routeChain = Promise.resolve();
+function routeLocked(fn) {
+  const run = routeChain.then(async () => { routeBusy++; try { return await fn(); } finally { routeBusy--; } });
+  routeChain = run.catch(() => {});
+  return run;
+}
+
 async function useForInternet(preferredGuid) {
   const pref = adapterOf(preferredGuid);
   if (!pref || pref.tunnel) return { ok: false, message: 'Choose a connection' };
@@ -259,7 +302,7 @@ async function useForInternet(preferredGuid) {
     if (cfg.vpn.method === 'route' && cfg.vpn.preferred.guid === pref.guid) return { ok: true };
     const off = await vpn.turnOff(cfg.vpn, saveJournal);    // one choice at a time
     if (!off.ok) return off;
-    await netdata.readAll().then(d => { if (d.ok) known = new Map(d.interfaces.filter(a => a.guid).map(a => [a.guid, a])); });
+    await netdata.readAll(readOpts()).then(d => { if (d.ok) known = new Map(d.interfaces.filter(a => a.guid).map(a => [a.guid, a])); });
   }
   const plan = planRoute([...known.values()], pref.guid);
   if (!plan) return { ok: false, message: `${pref.alias} has no way to the Internet (no gateway)` };
@@ -267,10 +310,10 @@ async function useForInternet(preferredGuid) {
   cfg.vpn_prefs = { method: 'route', preferred: ref(plan.chosen) };
   return vpn.routeOn({ preferred: ref(plan.chosen), aside: plan.aside.map(ref) }, saveJournal);
 }
-ipcMain.handle('vpn-on', (_e, preferredGuid) => useForInternet(preferredGuid));
-ipcMain.handle('route-set', (_e, guid) => useForInternet(guid));
-ipcMain.handle('route-auto', () => vpn.turnOff(cfg.vpn, saveJournal));
-ipcMain.handle('vpn-off', () => vpn.turnOff(cfg.vpn, saveJournal));
+ipcMain.handle('vpn-on', (_e, preferredGuid) => routeLocked(() => useForInternet(preferredGuid)));
+ipcMain.handle('route-set', (_e, guid) => routeLocked(() => useForInternet(guid)));
+ipcMain.handle('route-auto', () => routeLocked(() => vpn.turnOff(cfg.vpn, saveJournal)));
+ipcMain.handle('vpn-off', () => routeLocked(() => vpn.turnOff(cfg.vpn, saveJournal)));
 ipcMain.handle('vpn-restart-tunnel', (_e, name) =>
   tunnelsSeen.includes(name) ? vpn.restartTunnel(name) : { ok: false, message: 'This tunnel is not running' });
 ipcMain.handle('act-firewall', (_e, enable, profiles) =>
@@ -279,12 +322,17 @@ ipcMain.handle('act-firewall', (_e, enable, profiles) =>
 // ── IP settings: apply, then keep or put back ─────────────────────────────
 
 const pendingIp = new Map();     // guid -> { alias, snap }, until Keep / Revert
+const ipOps = new Set();         // Apply / Revert still running (quit waits for them)
+function tracked(p) { ipOps.add(p); p.finally(() => ipOps.delete(p)); return p; }
 
-ipcMain.handle('ip-apply', async (_e, guid, c) => {
+ipcMain.handle('ip-apply', (_e, guid, c) => tracked(ipApply(guid, c)));
+async function ipApply(guid, c) {
   const a = adapterOf(guid);
   if (!a) return NOT_FOUND;
   if (!c || (c.mode !== 'dhcp' && c.mode !== 'static')) return { ok: false, message: 'Unknown mode' };
   const snap = pendingIp.has(guid) ? pendingIp.get(guid).snap : ipSnapshot(a);
+  // Kept BEFORE applying: if the app closes in the middle, it is put back.
+  pendingIp.set(guid, { alias: a.alias, snap });
   let r;
   if (c.mode === 'dhcp') {
     r = await actions.applyDhcp(a.alias, a.dhcp);
@@ -296,7 +344,6 @@ ipcMain.handle('ip-apply', async (_e, guid, c) => {
     r = await actions.applyStatic(a.alias, conf);
   }
   if (r.ok) {
-    pendingIp.set(guid, { alias: a.alias, snap });
     // DHCP <-> fixed replaces every address of the card: the secondary
     // ones go back on (3.0.0 lost them without a word).
     const lost = await putBackSecondaries(guid, a.alias, snap.secondaries);
@@ -304,9 +351,10 @@ ipcMain.handle('ip-apply', async (_e, guid, c) => {
   } else {
     // Half-applied is the worst state: put the previous settings back now.
     await restoreIpAll(guid, a.alias, snap);
+    pendingIp.delete(guid);
   }
   return r;
-});
+}
 ipcMain.handle('ip-keep', (_e, guid) => {
   const p = pendingIp.get(guid);
   if (!p) return { ok: false };
@@ -314,14 +362,14 @@ ipcMain.handle('ip-keep', (_e, guid) => {
   store.logEvent('ipconfig', `${p.alias} : confirmed by user`);
   return { ok: true };
 });
-ipcMain.handle('ip-revert', async (_e, guid, why) => {
+ipcMain.handle('ip-revert', (_e, guid, why) => tracked((async () => {
   const p = pendingIp.get(guid);
   if (!p) return { ok: false, message: 'Nothing to put back' };
-  pendingIp.delete(guid);
   const r = await restoreIpAll(guid, p.alias, p.snap);
+  pendingIp.delete(guid);           // only once it is back
   store.logEvent('ipconfig', `${p.alias} : reverted (${why === 'timeout' ? 'not confirmed' : 'by user'})`);
   return r;
-});
+})()));
 
 // The previous settings, then the secondary addresses that went with them.
 async function restoreIpAll(guid, alias, snap) {
@@ -347,6 +395,15 @@ function cleanName(n) {
   const t = String(n == null ? '' : n).trim();
   return t.length <= 60 && !/[\u0000-\u001f\u007f]/.test(t) ? t : null;
 }
+// What the reading needs to know: which addresses are kept as secondary.
+function readOpts() {
+  const m = new Map();
+  for (const x of savedSecondaries()) {
+    if (!m.has(x.guid)) m.set(x.guid, new Set());
+    m.get(x.guid).add(x.ip);
+  }
+  return { secondary: m };
+}
 function savedSecondaries() {
   return (Array.isArray(cfg.secondary) ? cfg.secondary : []).filter(x =>
     x && typeof x.guid === 'string' && GUID_RE.test(x.guid) && validIp(x.ip) &&
@@ -365,10 +422,10 @@ function forgetSecondary(guid, ip) {
   store.saveConfig(cfg);
 }
 
-// After an address goes on, a card that had the Internet must keep it: if
-// Windows loses the Internet on it within 15 s (twice in a row, NCSI being
-// slow), the address goes back off by itself (Noar, 10.2026). Windows may
-// then pick the secondary address as the source of Internet traffic.
+// After an address goes on, a card that had the Internet must keep it. If
+// Windows still says "no Internet" on it after the few seconds it needs to
+// re-examine the network, the address goes back off by itself (Noar,
+// 10.2026). Timing and rule: netinfo.internetWatchVerdict.
 const watching = new Map();       // guid|ip -> true
 const CONNECTIVITY = "$ErrorActionPreference='SilentlyContinue'; " +
   "$a = @(Get-NetAdapter | Where-Object { \"$($_.InterfaceGuid)\" -eq $env:NCC_GUID }); " +
@@ -378,31 +435,32 @@ const CONNECTIVITY = "$ErrorActionPreference='SilentlyContinue'; " +
   "\"$($_.IPv6Connectivity)\" -eq 'Internet' }) { 'Internet' } else { 'lost' }";
 function watchInternet(a, ip) {
   const key = a.guid + '|' + ip;
-  if (watching.has(key)) return;
-  watching.set(key, true);
-  let misses = 0, n = 0;
+  // A token per watch: turning the address off and on again starts a new
+  // watch, and the old one stops instead of running beside it.
+  const token = {};
+  watching.set(key, token);
+  const reads = [];
   const step = async () => {
-    if (!watching.has(key)) return;
+    if (watching.get(key) !== token) return;
     const r = await runPs(CONNECTIVITY, { NCC_GUID: a.guid }, 10000);
-    const out = String(r.stdout || '').trim();
-    // 'none' (Windows re-identifying the network) proves nothing either way.
-    if (out === 'Internet') misses = 0;
-    else if (out === 'lost') misses++;
-    if (misses >= 2) {
+    if (watching.get(key) !== token) return;
+    reads.push(r.ok ? String(r.stdout || '').trim() : 'none');
+    const v = internetWatchVerdict(reads);
+    if (v === 'off') {
       watching.delete(key);
-      await actions.removeSecondary(a.guid, a.alias, ip, 'Internet lost on the card');
+      await actions.removeSecondary(a.guid, a.alias, ip, 'no Internet on the card after it went on');
       if (win) win.webContents.send('secondary-auto-off', { alias: a.alias, ip });
       return;
     }
-    if (++n >= 5) { watching.delete(key); return; }
-    setTimeout(step, 3000);
+    if (v === 'keep') { watching.delete(key); return; }
+    setTimeout(step, WATCH.everyMs);
   };
-  setTimeout(step, 3000);
+  setTimeout(step, WATCH.firstMs);
 }
 
 async function secondaryOn(a, ip, prefix, name) {
   if (a.tunnel) return { ok: false, message: 'Not on a VPN tunnel' };
-  if (a.status === 'Disabled') return { ok: false, message: 'This card is turned off: turn it on first' };
+  if (a.status === 'Disabled') return { ok: false, message: 'This adapter is turned off: turn it on first' };
   if (a.dhcp && !coexistenceSupported(os.release())) {
     return { ok: false, message: 'This version of Windows cannot keep a fixed address next to DHCP (Windows 10 2004 or later needed)' };
   }
@@ -549,9 +607,14 @@ ipcMain.handle('net-diagnose', (_e, gateways) => {
   return netdata.diagnose(clean);
 });
 ipcMain.handle('open-external', (_e, url) => openExternalSafely(url));
+// Notepad, by its full path: asking Windows "what opens .log files?" would
+// use the user's registry, and run whatever it names as administrator.
 ipcMain.handle('open-log', async () => {
-  const err = await shell.openPath(store.LOG_PATH);
-  return !err;
+  if (!require('fs').existsSync(store.LOG_PATH)) return false;
+  if (process.platform !== 'win32') return !(await shell.openPath(store.LOG_PATH));
+  const notepad = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'notepad.exe');
+  spawn(notepad, [store.LOG_PATH], { detached: true, stdio: 'ignore' }).unref();
+  return true;
 });
 
 ipcMain.on('win-minimize', () => win && win.minimize());

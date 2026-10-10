@@ -307,7 +307,7 @@ check('secondary check: /32 has no network address', ni.checkSecondary('192.168.
 check('secondary check: same range as the DHCP address', /main address/.test(ni.checkSecondary('10.20.0.200', 24, o2, l2)), true);
 check('secondary check: wider range covering the DHCP one', /main address/.test(ni.checkSecondary('10.30.0.1', 8, o2, l2)), true);
 check('secondary check: same range as another card', /One/.test(ni.checkSecondary('192.168.69.10', 24, o2, l2)), true);
-check('secondary check: already on the card', /already on this card/.test(ni.checkSecondary('192.168.50.20', 24, o2, l2)), true);
+check('secondary check: already on the card', /already on this adapter/.test(ni.checkSecondary('192.168.50.20', 24, o2, l2)), true);
 check('secondary check: used by another card', /Fixe/.test(ni.checkSecondary('10.0.10.5', 24, o2, l2)), true);
 check('secondary check: loopback refused', ni.checkSecondary('127.0.0.5', 8, o2, l2) !== '', true);
 check('secondary check: 169.254 refused', ni.checkSecondary('169.254.1.1', 16, o2, l2) !== '', true);
@@ -338,6 +338,49 @@ check('secondary script: coexistence on before adding', secPs.indexOf('dhcpstati
 check('secondary script: lookups always counted through @() (PS 5.1 CIM objects have no .Count)',
       /(?<!@)\(& \$find\)\.Count|\$x = & \$find/.test(secPs.replace(/^\s*#.*$/gm, '')), false);
 check('secondary script: coexistence off when none left', secPs.includes('dhcpstaticipcoexistence=disabled'), true);
+
+// 3.1.1 review: main address edge cases
+const RAW3 = { netsh: '', adapters: [
+  { InterfaceAlias: 'NoLease', Status: 'Disconnected', InterfaceGuid: '{N}', DhcpEnabled: true,
+    IPv4List: [{ IPAddress: '192.168.0.251', PrefixLength: 24, PrefixOrigin: 'Manual', AddressState: 'Preferred' }] },
+  { InterfaceAlias: 'FixedNoGw', Status: 'Up', InterfaceGuid: '{S}', DhcpEnabled: false, Gateway: '',
+    IPv4List: [{ IPAddress: '192.168.0.251', PrefixLength: 24, PrefixOrigin: 'Manual', AddressState: 'Preferred' },
+               { IPAddress: '10.0.0.5', PrefixLength: 24, PrefixOrigin: 'Manual', AddressState: 'Preferred' }] },
+] };
+const l3 = ni.buildInterfaces(RAW3, { secondary: new Map([['{S}', new Set(['192.168.0.251'])], ['{N}', new Set(['192.168.0.251'])]]) });
+const nl = l3.find(a => a.alias === 'NoLease'), fx = l3.find(a => a.alias === 'FixedNoGw');
+check('primary: DHCP adapter without lease has no main address', [nl.ipv4, nl.secondaries.map(x => x.ip)], ['', ['192.168.0.251']]);
+check('primary: fixed adapter without gateway skips a kept secondary', [fx.ipv4, fx.secondaries.map(x => x.ip)], ['10.0.0.5', ['192.168.0.251']]);
+
+// 3.1.1 review: config.json is the user's, checked before use
+const st = require('../src/main/store');
+const G1 = '{AAAAAAAA-0000-0000-0000-000000000001}';
+check('config: route journal accepted', st.validJournal({ active: true, method: 'route', preferred: { guid: G1, alias: 'W' },
+  changed: [{ guid: G1, alias: 'W', snapshot: { IPv4: { metric: 25, auto: true } } }] }), true);
+check('config: journal without preferred refused', st.validJournal({ active: true, method: 'route', changed: [] }), false);
+check('config: bad GUID refused', st.validJournal({ active: true, method: 'disable', preferred: { guid: 'x', alias: 'a' }, retreat: { guid: G1, alias: 'b' } }), false);
+check('config: odd metric refused', st.validJournal({ active: true, method: 'metric', preferred: { guid: G1, alias: 'a' },
+  retreat: { guid: G1, alias: 'b' }, snapshot: { IPv4: { metric: '1; rm', auto: true } } }), false);
+check('config: unknown method refused', st.validJournal({ active: true, method: 'x', preferred: { guid: G1, alias: 'a' } }), false);
+
+// 3.1.1 review: PowerShell never loads modules from the user's folders
+const psSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ps.js'), 'utf8');
+check('ps: every PowerShell gets the prelude', (psSrc.match(/PS_PRELUDE \+/g) || []).length, 3);
+check('ps: child environment fixed (module path, PATH)', /env\.PSModulePath = PS_MODULES/.test(psSrc) && /env\.PATH = SAFE_PATH/.test(psSrc), true);
+const allPs = ['interfaces', 'secondary', 'wireguard', 'watch'].map(n =>
+  fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ps', n + '.ps1'), 'utf8').replace(/^\s*#.*$/gm, '')).join('\n');
+check('ps: netsh never called by bare name', /(^|[;({\s])netsh\s+(wlan|interface)/m.test(allPs), false);
+const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
+check('main: no shell.openPath (Windows would pick the program)', /shell\.openPath\(store/.test(mainSrc.replace(/process\.platform !== 'win32'\) return !\(await shell\.openPath/, '')), false);
+check('main: debugger switches refused', /remote-debugging-port/.test(mainSrc) && /app\.exit\(1\)/.test(mainSrc), true);
+
+// Auto-off after ON: a short cut is ignored, a lasting one is not
+const W = ni.internetWatchVerdict;
+check('watch: short cut ignored', W(['lost', 'lost', 'Internet', 'Internet', 'Internet', 'Internet']), 'keep');
+check('watch: lasting cut -> off', W(['Internet', 'lost', 'lost', 'lost']), 'off');
+check('watch: no profile counts for nothing', W(['lost', 'none', 'lost', 'none', 'none', 'none']), 'keep');
+check('watch: still waiting', W(['lost', 'lost']), 'wait');
+check('watch: starts 10 s after ON, ends at 25 s', [ni.WATCH.firstMs + (ni.WATCH.reads - 1) * ni.WATCH.everyMs], [25000]);
 
 // ── Internet route (3.1.0) ────────────────────────────────────────────────
 const rlist = [
@@ -539,13 +582,14 @@ check('charter: no border declarations',
       (css.match(/border\s*:\s*(?!none|0)[^;}]+/g) || []), []);
 // One accent in the window (blue), grey information, red for problems only
 // (Noar, 10.2026): no orange or violet may creep back in, and green only on
-// the icon of a connected adapter and the badges of what works.
+// the icon of a connected adapter, the badges of what works, the firewall
+// when fully on and the VPN card when its server answers (3.1.1 review).
 check('colours: no orange / violet in the window',
       [...(css + js).matchAll(/--(orange|violet)\b|'(orange|violet)'|\.(orange|violet)\b/g)].map(m => m[0]), []);
 const codeOnly = (css + '\n' + js).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 check('colours: green only for what works (tile, badges)',
       [...codeOnly.matchAll(/[^\n]*\bgreen\b[^\n]*/g)].map(m => m[0].trim())
-        .filter(l => !/^\.tile\.green|^\.badge\.green|--green:|Up: ' green'|badge\([^)]*'green'|'green' : |\? 'green'|active \? 'green'/.test(l)), []);
+        .filter(l => !/^\.tile\.green|^\.badge\.green|--green:|Up: ' green'|badge\([^)]*'green'|'green' : |\? 'green'|active \? 'green'|^\.fw \.state\.green,\.vpn \.state\.green|^color = 'green'; label = 'ON';|answers \? ' green'/.test(l)), []);
 // The accent belongs to the logo only.
 check('charter: accent used once (logo)', (css.match(/var\(--accent\)/g) || []).length, 1);
 // Machine text never goes through innerHTML.
@@ -556,7 +600,8 @@ check('safety: no innerHTML in the window', /innerHTML/.test(js), false);
 const SRC = { 'i-wifi': 'wifi', 'i-network': 'network', 'i-shield-check': 'shield-check',
   'i-shield-off': 'shield-off', 'i-refresh': 'refresh-cw', 'i-eraser': 'eraser',
   'i-file-text': 'file-text', 'i-settings': 'settings', 'i-minus': 'minus',
-  'i-square': 'square', 'i-x': 'x', 'i-route': 'route' };
+  'i-square': 'square', 'i-x': 'x', 'i-route': 'route', 'i-check': 'check' };
+check('icons: no text symbol standing in for an icon', /[\u2713\u2714\u00d7]/.test(js), false);
 const symbols = [...html.matchAll(/<symbol id="([^"]+)"[^>]*>([\s\S]*?)<\/symbol>/g)];
 check('icons: every symbol has a known Lucide source',
       symbols.map(m => m[1]).filter(id => !SRC[id]), []);

@@ -25,6 +25,15 @@ files:
 # read by Node (which can) and passed to PowerShell as text, so they may stay
 # packed; nothing else needs unpacking.
 
+# The app runs as administrator: the ways to drive Electron from outside
+# (as plain Node, with a debugger, with NODE_OPTIONS, or from files next to
+# the archive) are switched off inside the program itself (3.1.1 review).
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+
 win:
   icon: build-resources/icon.ico
   # The app changes network profiles, IP settings and the firewall: it is

@@ -8,7 +8,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$wg = Join-Path $env:ProgramFiles 'WireGuard\wg.exe'
+$wg = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WireGuard\wg.exe'
 $installed = Test-Path $wg
 $out = @()
 $svc = @(Get-Service -Name 'WireGuardTunnel$*' | Where-Object { $_.Status -eq 'Running' })

@@ -52,14 +52,48 @@ function loadConfig() {
   // is not reused, the window simply opens centred once.
   if (typeof cfg.geometry === 'string') cfg.geometry = null;
   if (!Array.isArray(cfg.presets)) cfg.presets = [];
+  // The folder belongs to the user while the app runs as administrator:
+  // what comes back from it is checked before anything acts on it.
+  if (!Array.isArray(cfg.secondary)) cfg.secondary = [];
+  if (!Array.isArray(cfg.secondary_presets)) cfg.secondary_presets = [];
+  if (cfg.vpn !== null && !validJournal(cfg.vpn)) cfg.vpn = null;
   return cfg;
+}
+
+const GUID_RE = /^\{?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}?$/;
+const ref = r => !!r && typeof r === 'object' && typeof r.guid === 'string' && GUID_RE.test(r.guid) &&
+                 typeof r.alias === 'string' && r.alias.length <= 256;
+const metricSnap = s => !!s && typeof s === 'object' && ['IPv4', 'IPv6'].every(f =>
+  s[f] === undefined || (s[f] && Number.isInteger(s[f].metric) && s[f].metric >= 0 && s[f].metric <= 9999 &&
+                         typeof s[f].auto === 'boolean'));
+// A VPN / Internet route journal (vpn.js): the only shapes the app writes.
+function validJournal(j) {
+  if (!j || typeof j !== 'object' || j.active !== true || !ref(j.preferred)) return false;
+  if (j.method === 'route') {
+    return Array.isArray(j.changed) && j.changed.length >= 1 && j.changed.length <= 16 &&
+           j.changed.every(c => ref(c) && metricSnap(c.snapshot));
+  }
+  if (j.method === 'metric') return ref(j.retreat) && metricSnap(j.snapshot);
+  if (j.method === 'disable') return ref(j.retreat);
+  return false;
+}
+
+// Never write through a link: a junction or symbolic link put in place of
+// the folder or a file would make an administrator write anywhere.
+function isLink(p) {
+  try { return fs.lstatSync(p).isSymbolicLink(); } catch (_) { return false; }
+}
+function safeDir() {
+  fs.mkdirSync(DIR, { recursive: true });
+  return !isLink(DIR);
 }
 
 function saveConfig(cfg) {
   try {
-    fs.mkdirSync(DIR, { recursive: true });
+    if (!safeDir() || isLink(CONFIG_PATH)) return false;
     const tmp = CONFIG_PATH + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+    try { fs.unlinkSync(tmp); } catch (_) {}            // a link is removed, not followed
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, CONFIG_PATH);    // never a half-written config
     return true;
   } catch (_) { return false; }
@@ -77,9 +111,9 @@ function stamp() {
 function logEvent(kind, msg) {
   if (!logEnabled) return;
   try {
-    fs.mkdirSync(DIR, { recursive: true });
+    if (!safeDir() || isLink(LOG_PATH)) return;
     fs.appendFileSync(LOG_PATH, `${stamp()} | ${String(kind).padEnd(9)} | ${msg}\n`, 'utf8');
   } catch (_) {}
 }
 
-module.exports = { loadConfig, saveConfig, logEvent, setLogEnabled, CONFIG_PATH, LOG_PATH, DIR };
+module.exports = { loadConfig, saveConfig, logEvent, setLogEnabled, validJournal, CONFIG_PATH, LOG_PATH, DIR };

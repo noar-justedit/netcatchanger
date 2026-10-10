@@ -217,7 +217,9 @@ function statusRank(a) {
 
 // `raw` is what src/main/ps/interfaces.ps1 prints: { adapters:[...], netsh:"" }.
 // Returns the adapters the window shows, sorted: connected first.
-function buildInterfaces(raw) {
+// opts.secondary: Map guid -> Set of the secondary addresses kept for it.
+function buildInterfaces(raw, opts) {
+  const savedSec = (opts && opts.secondary) || new Map();
   if (!raw || typeof raw !== 'object') return [];
   let list = raw.adapters;
   if (!list) return [];
@@ -234,7 +236,8 @@ function buildInterfaces(raw) {
     const addresses = parseIpv4List(a.IPv4List);
     let primary = null;
     if (addresses.length) {
-      primary = pickPrimary(addresses, a.DhcpEnabled !== false, a.Gateway);
+      primary = pickPrimary(addresses, a.DhcpEnabled !== false, a.Gateway,
+                            savedSec.get(String(a.InterfaceGuid || '')));
     } else if (a.IPv4Address && a.IPv4Address !== 'N/A' && validIp(a.IPv4Address)) {
       primary = { ip: String(a.IPv4Address), origin: '', state: '',
                   prefix: Number.isInteger(a.PrefixLength) ? a.PrefixLength : -1 };
@@ -426,20 +429,28 @@ function parseIpv4List(list) {
 // The card's main address: the DHCP one; on a fixed card, the one whose
 // range holds the gateway, else the first one. 3.0.0 took the first address
 // Windows listed, which could be the secondary one.
-function pickPrimary(addrs, dhcp, gateway) {
+// `secondary` (optional): the addresses NetCatChanger keeps as secondary
+// for this card; on a fixed card without a gateway they are never taken as
+// the main one, whatever order Windows lists them in.
+function pickPrimary(addrs, dhcp, gateway, secondary) {
   if (!addrs.length) return null;
   if (dhcp) {
     const d = addrs.find(x => x.origin === 'Dhcp');
     if (d) return d;
     const w = addrs.find(x => x.origin === 'WellKnown');      // 169.254: no DHCP answer
     if (w) return w;
+    // No lease (yet): a fixed address on a DHCP card is a secondary one,
+    // never the main one.
+    return null;
   }
   if (validIp(gateway)) {
     const g = addrs.find(x => x.prefix > 0 && x.prefix <= 32 &&
       rangesOverlap(rangeOf(x.ip, x.prefix), rangeOf(gateway, 32)));
     if (g) return g;
   }
-  return addrs.find(x => x.origin !== 'WellKnown') || addrs[0];
+  const mine = secondary instanceof Set ? secondary : new Set();
+  return addrs.find(x => x.origin !== 'WellKnown' && !mine.has(x.ip)) ||
+         addrs.find(x => x.origin !== 'WellKnown') || addrs[0];
 }
 
 // The secondary addresses Windows has now on a card: every fixed address
@@ -463,13 +474,13 @@ function checkSecondary(ip, prefix, card, all) {
     for (const x of a.addresses || []) {
       if (x.origin === 'WellKnown' || !(x.prefix > 0)) continue;
       if (x.ip === ip) {
-        return a.guid === card.guid ? `${ip} is already on this card` : `${ip} is already used by ${a.alias}`;
+        return a.guid === card.guid ? `${ip} is already on this adapter` : `${ip} is already used by ${a.alias}`;
       }
     }
   }
   const p = card.primary;
   if (p && p.origin !== 'WellKnown' && p.prefix > 0 && rangesOverlap(r, rangeOf(p.ip, p.prefix))) {
-    return `Same range as the main address of this card (${rangeText(p.ip, p.prefix)})`;
+    return `Same range as the main address of this adapter (${rangeText(p.ip, p.prefix)})`;
   }
   for (const a of all || []) {
     if (a.guid === card.guid || a.status !== 'Up') continue;
@@ -507,6 +518,22 @@ function secondaryView(card, saved) {
              rangesOverlap(rangeOf(o.ip, o.prefix), rangeOf(p.ip, p.prefix))) o.problem = 'range';
   }
   return out;
+}
+
+// After a secondary address goes on, Windows re-examines the network and
+// cuts it for a few seconds (seen on SERVAL, 3.1.0). The watch therefore
+// starts 10 s after ON, reads Windows' verdict every 3 s until 25 s, and
+// turns the address back off only after 3 'lost' readings in a row (a cut
+// that lasts). 'none' (no profile yet, Windows still identifying) counts
+// for nothing. Returns 'off', 'keep' (watch over) or 'wait'.
+const WATCH = { firstMs: 10000, everyMs: 3000, reads: 6, lostInARow: 3 };
+function internetWatchVerdict(reads) {
+  let run = 0;
+  for (const r of reads) {
+    if (r === 'lost') { if (++run >= WATCH.lostInARow) return 'off'; }
+    else if (r === 'Internet') run = 0;
+  }
+  return reads.length >= WATCH.reads ? 'keep' : 'wait';
 }
 
 // Windows 10 2004 (build 19041) and later accept DHCP + fixed addresses on
@@ -549,6 +576,7 @@ function routeState(journal, list) {
 module.exports = {
   ROUTE_METRIC, routeCandidates, planRoute, routeState,
   ipToInt, intToIp, maskToPrefix, parsePrefix, rangeOf, rangesOverlap, rangeText,
+  WATCH, internetWatchVerdict,
   parseIpv4List, pickPrimary, secondariesOf, checkSecondary, secondaryView, coexistenceSupported,
   predictVpnExit, parseWgDump, tunnelHealth, sendsEverything, vpnState, RETREAT_METRIC,
   semverGt, prefixToMask, validIp, validMask, ipSnapshot, isApipa, psQuote,

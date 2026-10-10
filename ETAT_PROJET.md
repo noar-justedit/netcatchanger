@@ -1,23 +1,94 @@
 # NetCatChanger : état du projet
 
-Mis à jour le 08.10.2026.
+Mis à jour le 09.10.2026.
 
 ## En une phrase
 
 Gestionnaire de profils réseau Windows (Privé / Public / Domaine), de
-configuration IP, du pare-feu et de la sortie VPN WireGuard. **Version 3.1.0**
-en cours : IP secondaire et « Use for Internet », code écrit et vérifié hors
-Windows (tests, rendus), **pas encore testée sur SERVAL**. La 3.0.0
-(réécriture Electron de la 2.2.1) a été validée sur SERVAL le 07.10.2026.
+configuration IP, du pare-feu et de la sortie VPN WireGuard. **Version 3.1.1**
+(09.10.2026) : corrige le retour automatique de l'IP secondaire, écrit et
+vérifié hors Windows, **à tester sur SERVAL**. La 3.1.0 (IP secondaire,
+« Use for Internet ») a été validée sur SERVAL le 08.10.2026 ; la 3.0.0
+(réécriture Electron de la 2.2.1) le 07.10.2026.
+
+## Review complète avant la 3.1.1 (09.10.2026, demandée par Noar)
+
+Trois relectures (sécurité, bugs, cohérence de l'interface). Noar a laissé
+carte blanche (« corrige ce qui te semble judicieux »). Corrigé :
+
+- **Sécurité** (l'appli tourne en administrateur ; risques venant d'un autre
+  programme du même compte Windows) :
+  - PowerShell : `PSModulePath` limité aux modules de Windows et `PATH` à
+    System32, dans l'environnement des processus ET au début de chaque
+    script (`ps.js`, `PS_PRELUDE`, `childEnv`). netsh appelé par son chemin
+    complet partout, wg.exe via le dossier Program Files lu par .NET.
+  - Fusibles Electron (`electron-builder.yml`, `electronFuses`) : pas de mode
+    Node, pas de NODE_OPTIONS, pas d'inspecteur, code chargé seulement
+    depuis l'archive. Vérifié sur un build Linux d'essai (`@electron/fuses
+    read`) ; l'appli refuse aussi de démarrer avec un port de débogage.
+  - Journal ouvert avec notepad.exe (chemin complet), liens GitHub ouverts
+    par explorer.exe (bureau de l'utilisateur, non élevé) au lieu de
+    demander à Windows quel programme utiliser.
+  - `config.json` / `session.log` : jamais écrits à travers un lien
+    (jonction, lien symbolique) ; journal VPN / route validé au chargement
+    (`store.validJournal`), listes vérifiées.
+- **Bugs** : verrou sur les changements de priorité (une lecture en cours
+  ne peut plus effacer le journal) ; fin par Windows → les cartes mises de
+  côté sont remises aussi ; « Automatic » ne bute plus sur une carte
+  éteinte ; fermeture pendant Apply / Revert → l'appli attend et remet ;
+  avertissement si une adresse secondaire n'a pas pu être remise ; adresse
+  principale : carte DHCP sans bail → aucune, carte fixe sans passerelle →
+  jamais une secondaire gardée ; un seul contrôle Internet par adresse ;
+  netsh en échec jamais pris pour un succès ; retrait d'une adresse sur une
+  carte éteinte → aussi la copie de démarrage ; `load()` protégé ; messages
+  PowerShell en UTF-8.
+- **Interface** : pare-feu vert quand il est actif, partiellement actif →
+  interrupteur sur off et un clic remet tout ; carte VPN verte quand le
+  serveur répond ; bouton « Automatic » partout pour une route choisie ;
+  pas d'« IP settings » sur un tunnel ou une carte éteinte, pas de
+  « Secondary IP » sur une carte éteinte ; interrupteur du pare-feu grisé
+  si l'état est inconnu ; noms longs coupés par « … » ; icônes Lucide
+  `check` et `x` à la place des caractères ✓ et × ; vocabulaire
+  (« adapter », « Could not … », fenêtre « Secondary IP ») ; Entrée ajoute
+  une adresse ; avis de mise à jour fermé par Échap → reproposé.
+
+Laissé de côté (choix de Noar à trancher, ou non vérifiable ici) :
+
+- Le point violet du logo (`#5936d8`), contraire à « ni violet » : c'est son
+  dessin, à lui de décider.
+- La barre de signal Wi-Fi bleue, les noms « ADAPTER DISABLED », « Back to
+  normal » de l'ancien mode VPN 3.0.0 : validés tels quels jusqu'ici.
+- Les deux façons de gérer les préréglages (liste déroulante dans IP
+  settings, pastilles dans Secondary IP) : à unifier si Noar le veut.
+- Dossier des réglages dans `%APPDATA%` (modifiable par l'utilisateur) :
+  le déplacer dans `%ProgramData%` casserait la reprise des réglages 2.x ;
+  les écritures à travers un lien sont refusées en attendant.
+- `SystemRoot` / `ProgramFiles` côté Node lus dans l'environnement : à
+  vérifier sur un PC de test s'ils peuvent être détournés.
+- DNS manuels d'une carte DHCP perdus après un « Revert » (rare).
+- Intégrité de l'archive (fusible `enableEmbeddedAsarIntegrityValidation`) :
+  non activée, je n'ai pas pu la tester sur un build Windows.
+
+## À vérifier sur SERVAL pour la 3.1.1
+
+- Le build passe (fusibles Electron) et l'appli démarre.
+- ON d'une IP secondaire sur l'OWC : la coupure de quelques secondes ne doit
+  plus remettre l'adresse en OFF.
+- Toutes les lectures marchent encore (cartes, Wi-Fi, WireGuard, pare-feu) :
+  PowerShell a maintenant un environnement restreint.
+- Use for Internet : Wi-Fi, puis OWC, puis Automatic.
+- Bouton du journal (Notepad) et lien GitHub (navigateur non administrateur).
+- Pare-feu : couper un seul profil à la main, l'appli montre 2/3 et un clic
+  remet tout.
 
 ## Où en est la 3.1
 
 | Étape | Contenu | État |
 |---|---|---|
-| 1 | IP secondaire : lecture de toutes les adresses, ON / OFF par adresse, fenêtre « Secondary IP », préréglages, contrôles | premier essai réussi sur SERVAL (ajout d'une adresse), reste de la liste à tester |
-| 2 | Correction 3.0.0 : adresse principale mal choisie, IP settings effaçait les adresses secondaires | écrit, à tester sur SERVAL |
-| 3 | « Use for Internet » (priorité de route), fusionné avec la sortie VPN | écrit, à tester sur SERVAL |
-| 4 | Interface validée par Noar | validée ; retouches après le premier essai sur SERVAL (alignement, badge SECONDARY IP) |
+| 1 | IP secondaire : lecture de toutes les adresses, ON / OFF par adresse, fenêtre « Secondary IP », préréglages, contrôles | validé sur SERVAL |
+| 2 | Correction 3.0.0 : adresse principale mal choisie, IP settings effaçait les adresses secondaires | validé sur SERVAL |
+| 3 | « Use for Internet » (priorité de route), fusionné avec la sortie VPN | validé sur SERVAL |
+| 4 | Interface validée par Noar | validée le 08.10.2026, après retouches (alignement, badge SECONDARY IP, interrupteurs dans une colonne) |
 
 ## Où en est la 3.0
 
@@ -47,7 +118,7 @@ src/main/vpn.js         priorités : « Use for Internet » (routeOn), ancien mo
 src/main/netinfo.js     fonctions pures (parseurs, logique VPN), couvertes par les tests
 src/main/store.js       config.json et session.log dans %APPDATA%\NetCatChanger
 src/renderer/           index.html, style.css (charte), app.js
-test/run-tests.js       npm test (250 vérifications)
+test/run-tests.js       npm test (269 vérifications)
 scripts/build_windows.cmd    build de l'installeur, à lancer sur Windows
 scripts/fetch-electron.js    télécharge Electron une fois (curl, reprise, SHA-256)
 scripts/push_github.cmd/.ps1 publication sur GitHub, depuis Windows (décision de Noar)
@@ -155,11 +226,20 @@ Le code testé est donc exactement le code livré.
     broadcast (sauf /31 /32), pas 0.x, 127.x, 169.254, multicast ; pas la
     même plage que l'adresse principale de la carte ni qu'une autre carte
     connectée ; pas déjà utilisée.
-  - Retour automatique (Noar) : si la carte avait Internet et le perd deux
-    lectures de suite dans les 15 s qui suivent un ON, l'adresse repasse en
-    OFF. Limite : le verdict Internet de Windows est lent et une coupure sans
-    rapport peut aussi déclencher le retour. Le contrôle s'arrête si l'appli
-    est fermée pendant ces 15 s.
+  - Retour automatique (Noar) : si la carte avait Internet, l'appli lit le
+    verdict de Windows de 10 s à 25 s après un ON (toutes les 3 s) et
+    repasse l'adresse en OFF seulement après 3 lectures « pas d'Internet »
+    d'affilée (`internetWatchVerdict`). Pourquoi 10 s (09.10.2026) : sur
+    SERVAL, ajouter ou retirer une adresse coupe Internet quelques secondes
+    (Windows réexamine le réseau, mêmes commandes à la main) ; dans la 3.1.0
+    le contrôle commençait à 3 s et pouvait retirer l'adresse pour rien.
+    Limites : une coupure sans rapport peut aussi déclencher le retour ; le
+    contrôle s'arrête si l'appli est fermée pendant ces 25 s.
+  - Coupure de quelques secondes à chaque ON / OFF : comportement de Windows,
+    pas de message dans l'appli (Noar a refusé le message, 09.10.2026).
+  - Adresse source vérifiée sur SERVAL (09.10.2026) : avec l'IP secondaire,
+    Windows sort bien vers Internet avec l'adresse DHCP. Aucune règle de
+    priorité (prefixpolicy) nécessaire.
   - Préréglages (`secondary_presets`) : nom + adresse + préfixe, sans carte
     (recommandation acceptée par défaut, Noar n'a pas tranché ce point).
   - Adresses d'une carte disparue : listées dans la fenêtre (« Use here » /
@@ -199,11 +279,6 @@ Le code testé est donc exactement le code livré.
 
 ## Questions ouvertes (à poser à Noar)
 
-0. À tester sur SERVAL avec ses vraies plages : avec une adresse
-   secondaire, Windows prend-il bien l'adresse DHCP comme source vers
-   Internet ? (Sinon, le retour automatique la repasse en OFF ; l'option
-   netsh `skipassource` serait la piste, avec le risque de ne plus joindre
-   la plage secondaire.)
 1. La case « Block untunneled traffic » de son tunnel WireGuard est-elle
    cochée ?
 2. Résultat sur SERVAL (Ethernet et Wi-Fi branchés) de
@@ -227,7 +302,7 @@ Le code testé est donc exactement le code livré.
 - Avis de mise à jour : n'apparaîtra qu'une fois une version plus récente
   publiée sur GitHub.
 
-## À vérifier sur SERVAL pour la 3.1.0
+## Vérifié sur SERVAL pour la 3.1.0 (08.10.2026)
 
 - IP secondaire sur l'OWC en DHCP : ajout, ON / OFF, Remove ; `netsh
   interface ipv4 show interface <n>` montre la coexistence activée puis
@@ -253,7 +328,7 @@ Le code testé est donc exactement le code livré.
   reproduit puis vérifié avec un faux Windows sous PowerShell 7, protégé
   par un test. Ajouts au passage : si netsh échoue, `Remove-NetIPAddress` ;
   message de Windows dans l'erreur ; chaque demande ON / OFF écrite dans
-  `session.log`. À revérifier sur SERVAL.
+  `session.log`. Vérifié sur SERVAL le 08.10.2026.
 
 - Builds sur SERVAL (06.10.2026) : le téléchargement d'Electron par
   electron-builder abandonnait au bout de 10 minutes, et l'installeur

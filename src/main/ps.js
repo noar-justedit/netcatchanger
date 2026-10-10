@@ -56,6 +56,26 @@ function script(name) {
   return scriptCache[name];
 }
 
+// The app runs as administrator. PowerShell loads modules (and their
+// functions, which win over cmdlets and programs) from every folder in
+// PSModulePath, the first one being the user's Documents: a module dropped
+// there by any program of the user would run as administrator. Every child
+// process therefore gets Windows' own module folder and System32 only.
+const PS_MODULES = path.join(SYS32, 'WindowsPowerShell', 'v1.0', 'Modules');
+const SAFE_PATH = [SYS32, path.join(SYS32, 'WindowsPowerShell', 'v1.0'), path.join(SYS32, 'wbem')].join(';');
+function childEnv(extra) {
+  const env = Object.assign({}, process.env, extra || {});
+  for (const k of Object.keys(env)) {
+    if (/^(psmodulepath|path)$/i.test(k)) delete env[k];
+  }
+  env.PSModulePath = PS_MODULES;
+  env.PATH = SAFE_PATH;
+  return env;
+}
+// Also inside the script, in case Windows PowerShell adds the user's folder
+// back on its own at start-up.
+const PS_PRELUDE = "$env:PSModulePath = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\\v1.0\\Modules'); ";
+
 function run(exe, args, opts = {}) {
   return new Promise(resolve => {
     execFile(exe, args, {
@@ -63,7 +83,7 @@ function run(exe, args, opts = {}) {
       encoding: 'buffer',
       maxBuffer: 16 * 1024 * 1024,
       timeout: opts.timeout || 30000,
-      env: Object.assign({}, process.env, opts.env || {}),
+      env: childEnv(opts.env),
     }, (err, stdout, stderr) => {
       const code = err ? (typeof err.code === 'number' ? err.code : -1) : 0;
       resolve({
@@ -80,13 +100,15 @@ function run(exe, args, opts = {}) {
 // A read-only PowerShell script (by file name in ./ps, or inline text).
 function runPs(nameOrText, env, timeout) {
   const text = nameOrText.endsWith('.ps1') ? script(nameOrText) : nameOrText;
-  return run(EXE.powershell, PS_ARGS.concat([text]), { env, timeout });
+  return run(EXE.powershell, PS_ARGS.concat([PS_PRELUDE + text]), { env, timeout });
 }
 
 // A state-changing PowerShell command: any terminating error comes back as
 // exit code 1 with its message, so { ok } is the truth.
 async function runPsAction(cmd, env, timeout) {
-  const wrapped = "$ErrorActionPreference='Stop'; try { " + cmd +
+  // UTF-8 so that Windows' messages keep their accents (French Windows).
+  const wrapped = PS_PRELUDE + "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+    "$ErrorActionPreference='Stop'; try { " + cmd +
     " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; exit 0";
   const r = await run(EXE.powershell, PS_ARGS.concat([wrapped]), { env, timeout });
   return { ok: r.ok, message: r.stderr };
@@ -102,8 +124,8 @@ function runCmd(tool, args, timeout) {
 
 // A long-lived PowerShell script; `onLine` gets each line it prints.
 function spawnPs(name, onLine) {
-  const child = spawn(EXE.powershell, PS_ARGS.concat([script(name)]), {
-    windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+  const child = spawn(EXE.powershell, PS_ARGS.concat([PS_PRELUDE + script(name)]), {
+    windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], env: childEnv(),
   });
   let buf = '';
   child.stdout.on('data', d => {
@@ -118,4 +140,4 @@ function spawnPs(name, onLine) {
   return child;
 }
 
-module.exports = { runPs, runPsAction, runCmd, spawnPs, EXE };
+module.exports = { runPs, runPsAction, runCmd, spawnPs, EXE, childEnv, PS_PRELUDE };

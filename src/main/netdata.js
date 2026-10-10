@@ -23,11 +23,11 @@
 const { runPs, runCmd, spawnPs } = require('./ps');
 const { buildInterfaces, parseFirewall } = require('./netinfo');
 
-async function readInterfaces() {
+async function readInterfaces(opts) {
   const r = await runPs('interfaces.ps1', null, 45000);
   if (!r.stdout) return { ok: false, interfaces: [], error: r.stderr || 'no answer from PowerShell' };
   try {
-    return { ok: true, interfaces: buildInterfaces(JSON.parse(r.stdout)) };
+    return { ok: true, interfaces: buildInterfaces(JSON.parse(r.stdout), opts) };
   } catch (e) {
     return { ok: false, interfaces: [], error: 'unreadable answer from PowerShell' };
   }
@@ -39,8 +39,8 @@ async function readFirewall() {
   return parseFirewall(r.stdout);
 }
 
-async function readAll() {
-  const [ifs, fw] = await Promise.all([readInterfaces(), readFirewall()]);
+async function readAll(opts) {
+  const [ifs, fw] = await Promise.all([readInterfaces(opts), readFirewall()]);
   return { ok: ifs.ok, error: ifs.error || '', interfaces: ifs.interfaces, firewall: fw };
 }
 

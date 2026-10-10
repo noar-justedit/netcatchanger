@@ -91,7 +91,13 @@ async function restoreMetrics(guid, snap) {
     // No snapshot (should not happen): automatic priority is Windows' default.
     parts.push('Set-NetIPInterface -InterfaceIndex $a[0].ifIndex -AutomaticMetric Enabled -PolicyStore ActiveStore; ');
   }
-  return runPsAction(PICK + parts.join(''), { NCC_GUID: guid });
+  // A card that is gone, or turned off (no IP interface then), has nothing
+  // to put back: its priority returns by itself when it comes back. Not a
+  // failure, and not decided on the wording of Windows' message (localised).
+  return runPsAction("$a = @(Get-NetAdapter | Where-Object { \"$($_.InterfaceGuid)\" -eq $env:NCC_GUID }); " +
+    "if ($a.Count -ne 1) { exit 0 }; " +
+    "if (@(Get-NetIPInterface -InterfaceIndex $a[0].ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).Count -eq 0) { exit 0 }; " +
+    parts.join(''), { NCC_GUID: guid });
 }
 
 async function setEnabled(guid, enable) {
@@ -159,8 +165,7 @@ async function turnOff(journal, saveJournal) {
     let ok = true, message = '';
     for (const c of journal.changed || []) {
       const r = await restoreMetrics(c.guid, c.snapshot);
-      // A card that is gone took its priority with it: nothing to put back.
-      if (!r.ok && !/not found/i.test(r.message)) { ok = false; message = r.message; }
+      if (!r.ok) { ok = false; message = r.message; }
     }
     logEvent('route', `automatic again (was ${journal.preferred.alias}) : ${ok ? 'ok' : 'FAILED ' + short(message)}`);
     if (ok) saveJournal(null);

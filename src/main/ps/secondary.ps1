@@ -18,7 +18,7 @@
 # VPN away from the card.
 
 $ErrorActionPreference = 'Stop'
-$netsh = Join-Path $env:SystemRoot 'System32\netsh.exe'
+$netsh = Join-Path ([Environment]::SystemDirectory) 'netsh.exe'
 
 # UTF-8 only for the answer: netsh writes in the console code page, and its
 # messages (French accents) must be read before the switch.
@@ -30,7 +30,7 @@ function Send($o) {
 # netsh, its output as one line. In a try: under 'Stop', Windows PowerShell
 # 5.1 turns any line netsh writes on stderr into a fatal error.
 function Netsh {
-    try { $o = (& $netsh @args 2>&1 | Out-String) } catch { $o = "$($_.Exception.Message)" }
+    try { $o = (& $netsh @args 2>&1 | Out-String) } catch { $o = "$($_.Exception.Message)"; $global:LASTEXITCODE = 1 }
     return ($o -replace '\s+', ' ').Trim()
 }
 function Fail($msg) { Send ([ordered]@{ ok = $false; message = $msg }) }
@@ -71,10 +71,10 @@ try {
                 Fail 'This version of Windows cannot keep a fixed address next to DHCP (Windows 10 2004 or later needed)'
             }
             $said = Netsh interface ipv4 set interface "interface=$idx" 'dhcpstaticipcoexistence=enabled'
-            if ($LASTEXITCODE -ne 0) { Fail "Windows refused to mix DHCP and a fixed address on this card: $said" }
+            if ($LASTEXITCODE -ne 0) { Fail "Windows refused to mix DHCP and a fixed address on this adapter: $said" }
         }
         $said = Netsh interface ipv4 add address "name=$idx" "address=$env:NCC_IP" "mask=$env:NCC_MASK"
-        if ($LASTEXITCODE -ne 0) { & $coexOff; Fail "Windows refused this address: $said" }
+        if ($LASTEXITCODE -ne 0 -or ($up -and @(& $find).Count -eq 0)) { & $coexOff; Fail "Windows refused this address: $said" }
 
         # Windows asks the network whether someone already has the address
         # (duplicate address detection): Tentative while it asks, then
@@ -112,7 +112,12 @@ try {
             }
             if (@(& $find).Count -gt 0) { Fail "Windows refused to remove this address: $said" }
         }
-        # Already gone (removed outside the app): not an error.
+        # Already gone from the running configuration (removed outside the
+        # app, or the card is turned off): the copy Windows keeps for the
+        # next start goes too, or it would come back.
+        try {
+            Remove-NetIPAddress -InterfaceIndex $idx -IPAddress $env:NCC_IP -PolicyStore PersistentStore -Confirm:$false -ErrorAction Stop
+        } catch {}
         & $coexOff
         Send ([ordered]@{ ok = $true; message = ''; state = ''; checked = $false; gone = $true })
     }

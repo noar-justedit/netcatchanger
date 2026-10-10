@@ -87,6 +87,15 @@ pousser soi-même** : c'est la décision de Noar.
   - La fenêtre n'affiche jamais de contenu distant, ne navigue jamais
     ailleurs, n'utilise jamais `innerHTML` pour un texte venu de la machine.
   - `preload.js` est la liste fermée des actions offertes à la fenêtre.
+  - Tout PowerShell passe par `ps.js` (environnement restreint : modules de
+    Windows seulement, PATH limité à System32). Les programmes appelés
+    depuis un script le sont par leur chemin complet.
+  - Ne jamais demander à Windows « quel programme ouvre ceci ? »
+    (`shell.openPath`, `shell.openExternal` sous Windows) : le registre de
+    l'utilisateur choisirait un programme lancé en administrateur.
+  - Ce qui vient de `config.json` (dossier de l'utilisateur) est vérifié
+    avant usage ; on n'écrit jamais à travers un lien.
+  - Fusibles Electron dans `electron-builder.yml` : ne pas les retirer.
 - **Pièges déjà payés** (hérités de la 2.x) :
   - Les libellés de `netsh` sont traduits (« Type de radio »). Le parseur
     reconnaît les valeurs par leur forme (`92%`, `802.11ax`, `5 GHz`), jamais
@@ -97,3 +106,6 @@ pousser soi-même** : c'est la décision de Noar.
     AVANT de passer la sortie PowerShell en UTF-8 (`interfaces.ps1`).
   - PowerShell transforme une liste d'un seul élément en objet seul : le code
     Node accepte les deux.
+  - Windows PowerShell 5.1 : un objet Windows (CIM) seul n'a pas de `.Count`.
+    Toujours compter avec `@(...)`.Count (bug de la 3.1.0 : OFF ne retirait
+    rien).

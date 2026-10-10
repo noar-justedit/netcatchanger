@@ -58,7 +58,8 @@ package v1.52.0 (https://lucide.dev):
   route.svg         -> VPN exit card                (#i-route)
   minus.svg         -> window: minimize             (#i-minus)
   square.svg        -> window: maximize             (#i-square)
-  x.svg             -> window: close                (#i-x)
+  x.svg             -> window: close, delete a preset (#i-x)
+  check.svg         -> chosen option in a list      (#i-check)
 
 The original SVG sources are kept in assets/lucide/. Their path data is
 copied unchanged into src/renderer/index.html (one <symbol> per icon, ids

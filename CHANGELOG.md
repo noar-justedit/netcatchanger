@@ -1,5 +1,62 @@
 # Changelog
 
+## [3.1.1] - 2026-10-09
+
+### Fixed
+
+- Secondary IP: Windows cuts the Internet for a few seconds while it
+  re-examines the network after an address goes on or off. The automatic
+  turn-off could mistake that for a real loss and remove the address for
+  nothing. It now looks at the card from 10 s to 25 s after ON and turns the
+  address off only after a lasting cut (3 readings in a row without
+  Internet).
+- Use for Internet: a refresh landing in the middle of a change could drop
+  the record of it and leave priorities at 1 / 9000 until a restart; when
+  Windows resets the chosen adapter, the adapters set aside are put back
+  too; "Automatic" no longer fails while one of them is turned off.
+- Closing the window during an IP change, or during its undo, no longer
+  skips putting the previous settings back.
+- A warning is shown when a secondary address could not be put back after
+  an IP change.
+- A DHCP adapter without a lease no longer shows its secondary address as
+  its main one; on a fixed adapter without a gateway, a kept secondary
+  address is never taken as the main one.
+- Removing a secondary address while its adapter is off also removes the
+  copy Windows would bring back at the next start.
+- The update notice closed with Escape comes back at the next launch (only
+  "Later" skips that version).
+- The window no longer stops refreshing after a drawing error.
+
+### Security
+
+The app runs as administrator; these close ways for another program of the
+same user to borrow those rights:
+
+- PowerShell only loads Windows' own modules (a module placed in the user's
+  Documents folder could replace a command); netsh, wg.exe and other
+  programs are called by their full system path.
+- Electron fuses: no Node mode, no NODE_OPTIONS, no inspector from the
+  command line, app code only from its archive; a debugging switch on the
+  command line makes the app quit.
+- The session log opens in Notepad by its full path, and GitHub links open
+  through the user's own (not elevated) desktop, instead of asking Windows
+  which program to use.
+- config.json and session.log are never written through a link (junction,
+  symbolic link), and the saved VPN / route record is checked before use.
+
+### Changed
+
+- Firewall card green when fully on (like the badges of what works); partly
+  on, its switch shows off and a click turns every profile back on.
+- VPN card green when its server answers. Its undo button for a route chosen
+  with "Use for Internet" is named "Automatic", like on the adapter card.
+- No "IP settings" on a VPN tunnel or a turned-off adapter, no "Secondary
+  IP" on a turned-off adapter.
+- Long adapter names are shortened with "…" instead of running over the
+  addresses. Lucide icons for the ticks and the preset delete button.
+- Wording: "adapter" everywhere, "Could not …" for every failure, the
+  window is titled "Secondary IP"; Enter adds an address.
+
 ## [3.1.0] - 2026-10-08
 
 ### Added

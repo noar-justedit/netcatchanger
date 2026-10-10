@@ -13,7 +13,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 # captured BEFORE the output is switched to UTF-8 below, or its accented
 # letters would be decoded with the wrong table.
 $netsh = ''
-try { $netsh = (netsh wlan show interfaces 2>$null) -join "`n" } catch {}
+try { $netsh = (& (Join-Path ([Environment]::SystemDirectory) 'netsh.exe') wlan show interfaces 2>$null) -join "`n" } catch {}
 
 # Everything printed from here on is UTF-8, which is what Node decodes: an
 # adapter named "Connexion réseau" keeps its accent.
